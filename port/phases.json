@@ -1,0 +1,72 @@
+{
+  "$comment": "Phase plan for the Metro to Rust port, read by gate.sh. Agents may not edit 'baselineRef', 'perf' or anything under port/approvals/. Targets are speedups versus pure-JS Metro at baselineRef (2.0 = twice as fast), cumulative over phases. They are first proposals and Szymon may change them.",
+  "baselineRef": "c3d0455a69412db39900fd66db74683f4741c196",
+  "maxRegression": 0.05,
+  "phases": [
+    {
+      "id": 0,
+      "title": "Foundations",
+      "components": [],
+      "exit": "An empty Rust crate loads from Metro through napi-rs; METRO_RUST and the unstable_rust config switch exist; the differential check is green JS vs JS.",
+      "perf": {"targets": {}, "informational": []}
+    },
+    {
+      "id": 1,
+      "title": "Pure leaf libraries",
+      "components": ["ob1", "source-map", "cache-key", "core"],
+      "exit": "All metro-source-map tests pass with the Rust binding; differential bundles produce byte-identical .map files.",
+      "perf": {"targets": {"micro:source-map": 2.0}, "informational": []}
+    },
+    {
+      "id": 2,
+      "title": "Resolver",
+      "components": ["resolver"],
+      "exit": "Every resolver test and every case in port/blackbox/fixtures/resolver.json passes against Rust.",
+      "perf": {
+        "targets": {"micro:resolver": 1.5},
+        "informational": ["warm-build", "cold-filemap", "edit"],
+        "$comment": "End-to-end time may get worse while file lookups still cross into JS. The resolver goes live together with the Rust file map in phase 3."
+      }
+    },
+    {
+      "id": 3,
+      "title": "File map and resolution glue",
+      "components": ["file-map", "node-haste", "cache"],
+      "exit": "Black-box file-map suite passes with the Node crawler and with Watchman; differential bundles identical.",
+      "perf": {
+        "targets": {
+          "micro:file-map": 3.0,
+          "cold-filemap": 2.0,
+          "warm-build": 1.3
+        },
+        "informational": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Incremental graph",
+      "components": ["delta-core", "incremental"],
+      "exit": "Graph, incremental-rebuild and HMR suites pass on both sides; HMR deltas identical across a scripted edit session.",
+      "perf": {"targets": {"warm-build": 1.6, "edit": 1.2}, "informational": []}
+    },
+    {
+      "id": 5,
+      "title": "Output and server",
+      "components": ["serializers", "output", "assets", "hmr", "server", "lib"],
+      "exit": "Server endpoint, CLI and output suites pass on both sides; byte-identical output on the differential apps; the JS fallback still works.",
+      "perf": {"targets": {"warm-build": 2.5, "edit": 1.5}, "informational": []}
+    },
+    {
+      "id": 6,
+      "title": "Rust transform pass (optional)",
+      "components": [
+        "module-graph",
+        "transform-plugins",
+        "transform-worker",
+        "minify"
+      ],
+      "exit": "Snapshot parity for transform-plugin and collectDependencies tests; differential bundles identical with Terser.",
+      "perf": {"targets": {"cold-build": 3.0}, "informational": []}
+    }
+  ]
+}

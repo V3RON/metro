@@ -18,3 +18,5 @@ website/translated_docs
 .docusaurus
 .cache-loader
 yarn-error.log
+port/.cache/
+port/.gate/
