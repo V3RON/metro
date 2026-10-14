@@ -3,7 +3,7 @@
 //! and user callbacks.
 
 use crate::config::{ResolveRequest, ResolverConfig};
-use crate::error::ResolveError;
+use crate::error::{HostError, ResolveError};
 use crate::Resolution;
 use serde_json::Value;
 use std::sync::Arc;
@@ -31,30 +31,36 @@ pub struct PackageForModule {
     pub package_json: PackageJson,
 }
 
+/// Every lookup except `resolve_asset` and `log_warning` can fail with a
+/// `HostError` (a JS callback throwing); `resolve` propagates it unchanged as
+/// `ResolveError::Host`, where the JS exception would propagate.
 /// Everything the resolver needs from the outside world. All methods take
 /// `&self`; use interior mutability for caches. The trait is object-safe.
 pub trait ResolverHost {
     /// `fileSystemLookup`: whether `path` exists, whether it is a file or a
     /// directory, and its real path (symlinks resolved).
-    fn file_system_lookup(&self, path: &str) -> Lookup;
+    fn file_system_lookup(&self, path: &str) -> Result<Lookup, HostError>;
 
     /// `doesFileExist`: whether a regular file exists at `path`.
-    fn does_file_exist(&self, path: &str) -> bool;
+    fn does_file_exist(&self, path: &str) -> Result<bool, HostError>;
 
     /// `getPackage`: the parsed contents of the given `package.json` file.
-    fn get_package(&self, package_json_path: &str) -> Option<PackageJson>;
+    fn get_package(&self, package_json_path: &str) -> Result<Option<PackageJson>, HostError>;
 
     /// `getPackageForModule`: the closest package scope, parsed `package.json`
     /// and relative subpath for an absolute candidate path (which need not
     /// exist), or `None` if there is no package.json closer than the nearest
     /// `node_modules` directory.
-    fn get_package_for_module(&self, absolute_module_path: &str) -> Option<PackageForModule>;
+    fn get_package_for_module(
+        &self,
+        absolute_module_path: &str,
+    ) -> Result<Option<PackageForModule>, HostError>;
 
     /// `resolveHasteModule`: the file providing a Haste module of that name.
-    fn resolve_haste_module(&self, name: &str) -> Option<String>;
+    fn resolve_haste_module(&self, name: &str) -> Result<Option<String>, HostError>;
 
     /// `resolveHastePackage`: the package.json providing a Haste package.
-    fn resolve_haste_package(&self, name: &str) -> Option<String>;
+    fn resolve_haste_package(&self, name: &str) -> Result<Option<String>, HostError>;
 
     /// `resolveAsset`: the files of an asset (e.g. `icon@2x.png`). The JS
     /// caller swallows exceptions from this callback; a host must map a

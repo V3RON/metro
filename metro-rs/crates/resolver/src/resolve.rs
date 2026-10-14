@@ -75,7 +75,7 @@ pub fn resolve_default(
     } else if is_subpath_import(specifier) {
         let pkg = context
             .host()
-            .get_package_for_module(request.origin_module_path);
+            .get_package_for_module(request.origin_module_path)?;
         let imports_field = pkg
             .as_ref()
             .and_then(|p| non_null(p.package_json.get("imports")));
@@ -166,7 +166,7 @@ pub fn resolve_default(
 
     let origin_module_path = request.origin_module_path;
 
-    let closest_package_to_origin = context.host().get_package_for_module(origin_module_path);
+    let closest_package_to_origin = context.host().get_package_for_module(origin_module_path)?;
 
     let maybe_redirected_specifier = match &closest_package_to_origin {
         Some(p) => match_subpath_from_main_fields(
@@ -229,7 +229,7 @@ pub fn resolve_default(
         if parsed_specifier.is_single_part {
             let result = context
                 .host()
-                .resolve_haste_module(&parsed_specifier.first_part);
+                .resolve_haste_module(&parsed_specifier.first_part)?;
             if let Some(result) = result {
                 return Ok(Resolution::SourceFile { file_path: result });
             }
@@ -409,7 +409,7 @@ fn resolve_from_node_modules_path(
     } else {
         node_modules_path.to_string()
     };
-    let lookup_result = ctx.host().file_system_lookup(&must_be_directory);
+    let lookup_result = ctx.host().file_system_lookup(&must_be_directory)?;
     if !matches!(lookup_result, Lookup::Dir { .. }) {
         return Ok(None);
     }
@@ -429,7 +429,7 @@ fn resolve_module_from_target_path(
     platform: Option<&str>,
     target_path: &str,
 ) -> Result<Option<Resolution>, ResolveError> {
-    let candidate = match redirect_module_path(ctx, target_path) {
+    let candidate = match redirect_module_path(ctx, target_path)? {
         Redirect::Ignored => return Ok(Some(Resolution::Empty)),
         Redirect::Path(p) => p,
     };
@@ -543,7 +543,7 @@ fn resolve_module_path(
             to_module_name,
         ])
     };
-    let redirected_path = match redirect_module_path(ctx, &module_path) {
+    let redirected_path = match redirect_module_path(ctx, &module_path)? {
         Redirect::Ignored => return Ok(Attempt::Resolved(Resolution::Empty)),
         Redirect::Path(p) => p,
     };
@@ -581,7 +581,7 @@ fn resolve_haste_package(
     parsed: &ParsedBareSpecifier,
     platform: Option<&str>,
 ) -> AttemptResult<()> {
-    let package_json_path = match ctx.host().resolve_haste_package(&parsed.package_name) {
+    let package_json_path = match ctx.host().resolve_haste_package(&parsed.package_name)? {
         None => return Ok(Attempt::Failed(())),
         Some(p) => p,
     };
@@ -610,7 +610,7 @@ fn resolve_package(
     platform: Option<&str>,
 ) -> AttemptResult<FileAndDirCandidates> {
     if ctx.config.unstable_enable_package_exports {
-        let pkg = ctx.host().get_package_for_module(absolute_candidate_path);
+        let pkg = ctx.host().get_package_for_module(absolute_candidate_path)?;
         let exports_field = pkg
             .as_ref()
             .and_then(|p| non_null(p.package_json.get("exports")));
@@ -660,7 +660,7 @@ fn resolve_package_entry_point(
     package_path: &str,
     platform: Option<&str>,
 ) -> AttemptResult<FileCandidates> {
-    let dir_lookup = ctx.host().file_system_lookup(package_path);
+    let dir_lookup = ctx.host().file_system_lookup(package_path)?;
     if !matches!(dir_lookup, Lookup::Dir { .. }) {
         return Ok(Attempt::Failed(FileCandidates::SourceFile {
             file_path_prefix: package_path.to_string(),
@@ -670,14 +670,14 @@ fn resolve_package_entry_point(
 
     let package_json_path = path::join(&[package_path, "package.json"]);
 
-    if !ctx.host().does_file_exist(&package_json_path) {
+    if !ctx.host().does_file_exist(&package_json_path)? {
         return resolve_file(ctx, package_path, "index", platform);
     }
 
     let root_path = path::dirname(&package_json_path);
     let package_json = ctx
         .host()
-        .get_package(&package_json_path)
+        .get_package(&package_json_path)?
         .unwrap_or_else(|| std::sync::Arc::new(Value::Object(Default::default())));
 
     let main_module_path = path::join(&[&root_path, &get_package_entry_point(ctx, &package_json)]);
@@ -739,7 +739,7 @@ fn resolve_file(
         candidate_exts: &mut candidate_exts,
         file_path_prefix: &file_path_prefix,
     };
-    let source_file_resolution = resolve_source_file(sf_context, platform);
+    let source_file_resolution = resolve_source_file(sf_context, platform)?;
     Ok(match source_file_resolution {
         Some(SourceFileResolution::Path(p)) => {
             Attempt::Resolved(Resolution::SourceFile { file_path: p })
@@ -785,22 +785,22 @@ impl SourceFileResolution {
 fn resolve_source_file(
     mut context: SourceFileContext<'_, '_>,
     platform: Option<&str>,
-) -> Option<SourceFileResolution> {
-    let file_path = resolve_source_file_for_all_exts(&mut context, "", None);
+) -> Result<Option<SourceFileResolution>, ResolveError> {
+    let file_path = resolve_source_file_for_all_exts(&mut context, "", None)?;
     if let Some(fp) = file_path {
         if fp.is_truthy() {
-            return Some(fp);
+            return Ok(Some(fp));
         }
     }
     let source_exts = &context.ctx.config.source_exts;
     for source_ext in source_exts {
         let ext = format!(".{source_ext}");
-        let file_path = resolve_source_file_for_all_exts(&mut context, &ext, platform);
+        let file_path = resolve_source_file_for_all_exts(&mut context, &ext, platform)?;
         if file_path.is_some() {
-            return file_path;
+            return Ok(file_path);
         }
     }
-    None
+    Ok(None)
 }
 
 /// For a particular extension, ex. `js`, we want to try a few possibilities,
@@ -811,21 +811,21 @@ fn resolve_source_file_for_all_exts(
     context: &mut SourceFileContext<'_, '_>,
     source_ext: &str,
     platform: Option<&str>,
-) -> Option<SourceFileResolution> {
+) -> Result<Option<SourceFileResolution>, ResolveError> {
     if let Some(platform) = platform {
         let ext = format!(".{platform}{source_ext}");
-        let file_path = resolve_source_file_for_ext(context, &ext);
+        let file_path = resolve_source_file_for_ext(context, &ext)?;
         if let Some(fp) = file_path {
             if fp.is_truthy() {
-                return Some(fp);
+                return Ok(Some(fp));
             }
         }
     }
     if context.ctx.config.prefer_native_platform && !source_ext.is_empty() {
-        let file_path = resolve_source_file_for_ext(context, &format!(".native{source_ext}"));
+        let file_path = resolve_source_file_for_ext(context, &format!(".native{source_ext}"))?;
         if let Some(fp) = file_path {
             if fp.is_truthy() {
-                return Some(fp);
+                return Ok(Some(fp));
             }
         }
     }
@@ -837,24 +837,24 @@ fn resolve_source_file_for_all_exts(
 fn resolve_source_file_for_ext(
     context: &mut SourceFileContext<'_, '_>,
     extension: &str,
-) -> Option<SourceFileResolution> {
+) -> Result<Option<SourceFileResolution>, ResolveError> {
     let file_path = format!("{}{extension}", context.file_path_prefix);
     let redirected_path =
         // Any redirections for the bare path have already happened
         if !extension.is_empty() {
-            redirect_module_path(context.ctx, &file_path)
+            redirect_module_path(context.ctx, &file_path)?
         } else {
             Redirect::Path(file_path)
         };
     let redirected_path = match redirected_path {
-        Redirect::Ignored => return Some(SourceFileResolution::Empty),
+        Redirect::Ignored => return Ok(Some(SourceFileResolution::Empty)),
         Redirect::Path(p) => p,
     };
-    if let Lookup::File { real_path } = context.ctx.host().file_system_lookup(&redirected_path) {
-        return Some(SourceFileResolution::Path(real_path));
+    if let Lookup::File { real_path } = context.ctx.host().file_system_lookup(&redirected_path)? {
+        return Ok(Some(SourceFileResolution::Path(real_path)));
     }
     context.candidate_exts.push(extension.to_string());
-    None
+    Ok(None)
 }
 
 /// `/^[.][.]?(?:[/]|$)/.test(filePath)`.

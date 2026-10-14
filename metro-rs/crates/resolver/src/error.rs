@@ -226,3 +226,9 @@ impl fmt::Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+impl From<HostError> for ResolveError {
+    fn from(e: HostError) -> Self {
+        ResolveError::Host(e)
+    }
+}

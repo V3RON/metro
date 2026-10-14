@@ -9,8 +9,8 @@
 
 use metro_rs_resolver::path;
 use metro_rs_resolver::{
-    resolve, Lookup, PackageForModule, PackageJson, Resolution, ResolveRequest, ResolverConfig,
-    ResolverHost,
+    resolve, HostError, Lookup, PackageForModule, PackageJson, Resolution, ResolveRequest,
+    ResolverConfig, ResolverHost,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -58,8 +58,8 @@ impl MemoryHost {
     }
 }
 
-impl ResolverHost for MemoryHost {
-    fn file_system_lookup(&self, input_path: &str) -> Lookup {
+impl MemoryHost {
+    fn lookup(&self, input_path: &str) -> Lookup {
         // Normalise and remove any trailing slash.
         let file_path = path::resolve(&[input_path]);
         match self.files.get(&file_path) {
@@ -82,7 +82,7 @@ impl ResolverHost for MemoryHost {
         }
     }
 
-    fn does_file_exist(&self, file_path: &str) -> bool {
+    fn file_exists(&self, file_path: &str) -> bool {
         // Should return false unless realpath(filePath) exists. We mock
         // shallow dereferencing.
         matches!(
@@ -91,7 +91,7 @@ impl ResolverHost for MemoryHost {
         )
     }
 
-    fn get_package(&self, package_json_path: &str) -> Option<PackageJson> {
+    fn package(&self, package_json_path: &str) -> Option<PackageJson> {
         match self.files.get(package_json_path) {
             Some(Entry::File(contents)) => Some(Arc::new(
                 serde_json::from_str(contents).expect("JSON.parse would throw here too"),
@@ -100,7 +100,7 @@ impl ResolverHost for MemoryHost {
         }
     }
 
-    fn get_package_for_module(&self, module_path: &str) -> Option<PackageForModule> {
+    fn package_for_module(&self, module_path: &str) -> Option<PackageForModule> {
         let parsed_path = path::parse(module_path);
         let root = parsed_path.root;
         let mut dir = path::join(&[&parsed_path.dir, &parsed_path.base]);
@@ -110,7 +110,7 @@ impl ResolverHost for MemoryHost {
                 return None;
             }
             let candidate = path::join(&[&dir, "package.json"]);
-            if let Some(package_json) = self.get_package(&candidate) {
+            if let Some(package_json) = self.package(&candidate) {
                 return Some(PackageForModule {
                     root_path: dir.clone(),
                     package_json,
@@ -128,7 +128,7 @@ impl ResolverHost for MemoryHost {
         }
     }
 
-    fn resolve_haste_module(&self, name: &str) -> Option<String> {
+    fn haste_module(&self, name: &str) -> Option<String> {
         if !self.has_haste_override {
             return None;
         }
@@ -138,9 +138,31 @@ impl ResolverHost for MemoryHost {
             .filter(|p| !p.is_empty())
             .cloned()
     }
+}
 
-    fn resolve_haste_package(&self, _name: &str) -> Option<String> {
-        None
+impl ResolverHost for MemoryHost {
+    fn file_system_lookup(&self, path: &str) -> Result<Lookup, HostError> {
+        Ok(self.lookup(path))
+    }
+
+    fn does_file_exist(&self, path: &str) -> Result<bool, HostError> {
+        Ok(self.file_exists(path))
+    }
+
+    fn get_package(&self, package_json_path: &str) -> Result<Option<PackageJson>, HostError> {
+        Ok(self.package(package_json_path))
+    }
+
+    fn get_package_for_module(&self, path: &str) -> Result<Option<PackageForModule>, HostError> {
+        Ok(self.package_for_module(path))
+    }
+
+    fn resolve_haste_module(&self, name: &str) -> Result<Option<String>, HostError> {
+        Ok(self.haste_module(name))
+    }
+
+    fn resolve_haste_package(&self, _name: &str) -> Result<Option<String>, HostError> {
+        Ok(None)
     }
 
     fn resolve_asset(

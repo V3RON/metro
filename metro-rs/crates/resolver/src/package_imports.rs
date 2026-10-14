@@ -100,7 +100,7 @@ pub fn resolve_package_target_from_imports(
         }
     }
 
-    if let Lookup::File { real_path } = ctx.host().file_system_lookup(&file_path) {
+    if let Lookup::File { real_path } = ctx.host().file_system_lookup(&file_path)? {
         return Ok(Resolution::SourceFile {
             file_path: real_path,
         });

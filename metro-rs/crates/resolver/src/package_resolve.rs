@@ -2,6 +2,7 @@
 //! on the "browser" field spec.
 
 use crate::config::Ctx;
+use crate::error::ResolveError;
 use crate::path;
 use crate::utils::system_to_posix_path;
 use serde_json::Value;
@@ -89,7 +90,7 @@ pub fn get_package_entry_point(ctx: &Ctx<'_>, pkg: &Value) -> String {
 ///   redirected by `package.json` rules in the containing package.
 /// - An absolute specifier, which may be redirected by `package.json` rules
 ///   in the containing package (non-standard, "browser" spec only).
-pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Redirect {
+pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Result<Redirect, ResolveError> {
     let main_fields = &ctx.config.main_fields;
     let is_module_path_absolute = path::is_absolute(module_path);
 
@@ -99,11 +100,11 @@ pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Redirect {
             module_path
         } else {
             ctx.request.origin_module_path
-        });
+        })?;
 
     let containing_package = match containing_package {
         // No package.json rules apply
-        None => return Redirect::Path(module_path.to_string()),
+        None => return Ok(Redirect::Path(module_path.to_string())),
         Some(p) => p,
     };
 
@@ -156,7 +157,7 @@ pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Redirect {
         );
     }
 
-    redirected_path.unwrap_or_else(|| Redirect::Path(module_path.to_string()))
+    Ok(redirected_path.unwrap_or_else(|| Redirect::Path(module_path.to_string())))
 }
 
 /// Get the mapped replacement for the given subpath defined by matching
