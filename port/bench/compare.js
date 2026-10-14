@@ -61,7 +61,7 @@ function runOnce(side, scenario, app) {
   if (scenario === 'cold-build') fs.rmSync(cache, {recursive: true, force: true});
   if (scenario === 'cold-filemap') fs.rmSync(path.join(cache, 'filemap'), {recursive: true, force: true});
   fs.mkdirSync(cache, {recursive: true});
-  const args = [path.join(__dirname, 'run.js'), '--metro', side.root, '--app', app, '--cache', cache, '--scenario', scenario];
+  const args = ['--expose-gc', path.join(__dirname, 'run.js'), '--metro', side.root, '--app', app, '--cache', cache, '--scenario', scenario];
   // The baseline's cold build also writes the source map the source-map micro-benchmark reads.
   if (scenario === 'cold-build' && side.name === 'baseline') args.push('--out', path.join(CACHE, 'bench', 'bench.js'));
   const start = process.hrtime.bigint();
@@ -141,9 +141,13 @@ function main() {
     }
     const bRss = median(b.map(x => x.peakRssMB));
     const cRss = median(c.map(x => x.peakRssMB));
-    if (status === 'ok' && !s.startsWith('micro:') && cRss > bRss * 1.1) {
+    // The memory check uses resident memory after a forced full GC: peak RSS
+    // depends on when V8 happens to collect (Szymon, 2026-10-14).
+    const bGc = median(b.map(x => x.afterGcRssMB));
+    const cGc = median(c.map(x => x.afterGcRssMB));
+    if (status === 'ok' && !s.startsWith('micro:') && cGc > bGc * 1.1) {
       status = 'fail';
-      note = `peak memory up ${Math.round((cRss / bRss - 1) * 100)}%`;
+      note = `memory after GC up ${Math.round((cGc / bGc - 1) * 100)}%`;
     }
     // A single quick run has no noise estimate, so a regression there is only
     // a warning; full runs and --report enforce it. Missed targets still fail.
@@ -159,6 +163,8 @@ function main() {
       noisePct: Math.round(noise * 1000) / 10,
       baselineRssMB: bRss,
       candidateRssMB: cRss,
+      baselineAfterGcMB: bGc,
+      candidateAfterGcMB: cGc,
       runs: b.length,
       status,
       note,
@@ -196,16 +202,16 @@ function toMarkdown(r) {
     `Pure JS at \`${r.baseline.ref.slice(0, 12)}\` against \`${r.candidate.commit.slice(0, 12)}\`${r.candidate.dirty ? ' (uncommitted changes)' : ''} with \`METRO_RUST=${r.candidate.metroRust}\`. ` +
       `${r.machine.cores} × ${r.machine.cpu}, ${r.machine.memGB} GB, ${r.machine.os}, Node ${r.machine.node}. Medians of ${Math.max(...r.rows.map(x => x.runs || 0))} interleaved runs.`,
     '',
-    '| Scenario | Pure JS | With Rust | Speed-up | Noise | Peak RSS (JS → Rust) | Result |',
-    '|---|---:|---:|---:|---:|---|---|',
+    '| Scenario | Pure JS | With Rust | Speed-up | Noise | Memory after GC (JS → Rust) | Peak RSS (JS → Rust) | Result |',
+    '|---|---:|---:|---:|---:|---|---|---|',
   ];
   for (const x of r.rows) {
     if (x.baselineMs == null) {
-      lines.push(`| ${x.scenario} | | | | | | ${icon[x.status]} ${x.note} |`);
+      lines.push(`| ${x.scenario} | | | | | | | ${icon[x.status]} ${x.note} |`);
       continue;
     }
     lines.push(
-      `| ${x.scenario} | ${x.baselineMs} ms | ${x.candidateMs} ms | ${x.speedup}× | ±${x.noisePct}% | ${x.baselineRssMB} → ${x.candidateRssMB} MB | ${icon[x.status]}${x.note ? ` (${x.note})` : ''} |`,
+      `| ${x.scenario} | ${x.baselineMs} ms | ${x.candidateMs} ms | ${x.speedup}× | ±${x.noisePct}% | ${x.baselineAfterGcMB} → ${x.candidateAfterGcMB} MB | ${x.baselineRssMB} → ${x.candidateRssMB} MB | ${icon[x.status]}${x.note ? ` (${x.note})` : ''} |`,
     );
   }
   const edit = r.rows.find(x => x.scenario === 'edit');
