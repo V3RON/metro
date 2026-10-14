@@ -1,0 +1,17 @@
+[package]
+name = "metro-rs-file-map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Rust core of metro-file-map: file metadata, node crawler, delta processing, change aggregation, queries and the disk cache."
+
+[dependencies]
+metro-rs-file-store = { path = "../file-store" }
+metro-rs-resolver = { path = "../resolver" }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+sha1 = "0.10"
+regress = "0.12"
+rayon = "1"
