@@ -137,7 +137,7 @@ impl FileMetadata {
 }
 
 /// A JS number: an integer prints as an integer.
-fn number(n: f64) -> Value {
+pub(crate) fn number(n: f64) -> Value {
     if n.fract() == 0.0 && n.abs() < 9.0e15 {
         Value::from(n as i64)
     } else {

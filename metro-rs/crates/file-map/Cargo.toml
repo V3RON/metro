@@ -13,5 +13,5 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 sha1 = "0.10"
-regress = "0.12"
+regress = { version = "0.12", features = ["utf16"] }
 rayon = "1"

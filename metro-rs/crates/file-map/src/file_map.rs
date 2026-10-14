@@ -68,6 +68,10 @@ impl Recorder<'_> {
 }
 
 impl ChangeSink<FileMetadata> for Recorder<'_> {
+    fn is_listener(&self) -> bool {
+        self.aggregator.is_some()
+    }
+
     fn directory_added(&mut self, canonical_path: &str) {
         if let Some(a) = self.aggregator.as_deref_mut() {
             a.directory_added(canonical_path);

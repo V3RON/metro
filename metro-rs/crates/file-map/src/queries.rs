@@ -234,10 +234,11 @@ impl FileMap {
         }
 
         // `processFile(canonicalPath, fileMetadata, {computeSha1: true})`
-        let Some(input) =
-            get_worker_input(&canonical_path, file_metadata, true, &self.config.plugins)
-        else {
-            // No worker ran, so the SHA-1 stays empty.
+        let input = get_worker_input(&canonical_path, file_metadata, true, &self.config.plugins)
+            .filter(|input| input.compute_sha1);
+        let Some(input) = input else {
+            // The worker does not hash (an empty SHA-1 is not `null`), so the
+            // SHA-1 stays empty.
             return Err(Invariant(format!(
                 "File processing didn't populate a SHA-1 hash for {canonical_path}"
             )));

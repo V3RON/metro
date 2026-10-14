@@ -33,6 +33,8 @@ pub struct JsRegExp {
     regex: regress::Regex,
     source: String,
     flags: String,
+    /// The `u` or `v` flag.
+    unicode: bool,
 }
 
 impl JsRegExp {
@@ -58,12 +60,23 @@ impl JsRegExp {
             regex,
             source: source.to_string(),
             flags: flags.to_string(),
+            unicode: seen.contains('u') || seen.contains('v'),
         })
     }
 
     /// `regexp.test(text)` for a RegExp without `g` or `y`.
     pub fn test(&self, text: &str) -> bool {
-        self.regex.find(text).is_some()
+        if text.is_ascii() {
+            return self.regex.find(text).is_some();
+        }
+        // JS strings are UTF-16: without the `u` and `v` flags an astral
+        // character is two code units (`/^.$/.test('\u{1F600}')` is false).
+        let units: Vec<u16> = text.encode_utf16().collect();
+        if self.unicode {
+            self.regex.find_from_utf16(&units, 0).next().is_some()
+        } else {
+            self.regex.find_from_ucs2(&units, 0).next().is_some()
+        }
     }
 
     pub fn source(&self) -> &str {

@@ -10,6 +10,7 @@
 use crate::file_map::{FileMap, FileMapConfig};
 use crate::metadata::FileMetadata;
 use crate::FileMapError;
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufReader, BufWriter, Write};
@@ -33,11 +34,47 @@ pub struct CacheExtras {
 }
 
 #[derive(Serialize, Deserialize)]
-struct CacheFile {
-    format_version: u32,
-    root_dir: String,
-    extras: CacheExtras,
-    files: Vec<(String, FileMetadata)>,
+pub(crate) struct CacheFile {
+    pub(crate) format_version: u32,
+    pub(crate) root_dir: String,
+    pub(crate) extras: CacheExtras,
+    pub(crate) files: Vec<(String, FileMetadata)>,
+}
+
+/// Writes `file` atomically: a temporary file in the same directory, then a
+/// rename over `path`.
+pub(crate) fn write_file(path: &Path, file: &CacheFile) -> Result<(), FileMapError> {
+    let io_err = |e: std::io::Error| {
+        FileMapError::new(format!("Error writing cache to {}: {e}", path.display()))
+    };
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        path.file_name()
+            .map_or("cache".into(), |n| n.to_string_lossy()),
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut writer = BufWriter::new(fs::File::create(&tmp)?);
+        writer.write_all(&MAGIC)?;
+        bincode_options()
+            .serialize_into(&mut writer, file)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        writer.flush()?;
+        drop(writer);
+        fs::rename(&tmp, path)
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(io_err(e));
+    }
+    Ok(())
+}
+
+fn bincode_options() -> impl bincode::Options {
+    bincode::options()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
 }
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -58,30 +95,7 @@ impl FileMap {
             files,
         };
 
-        let io_err = |e: std::io::Error| {
-            FileMapError::new(format!("Error writing cache to {}: {e}", path.display()))
-        };
-        let tmp = path.with_file_name(format!(
-            "{}.{}.{}.tmp",
-            path.file_name()
-                .map_or("cache".into(), |n| n.to_string_lossy()),
-            std::process::id(),
-            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let result = (|| {
-            let mut writer = BufWriter::new(fs::File::create(&tmp)?);
-            writer.write_all(&MAGIC)?;
-            bincode::serialize_into(&mut writer, &file)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            writer.flush()?;
-            drop(writer);
-            fs::rename(&tmp, path)
-        })();
-        if let Err(e) = result {
-            let _ = fs::remove_file(&tmp);
-            return Err(io_err(e));
-        }
-        Ok(())
+        write_file(path, &file)
     }
 
     /// Reads a cache written by [`FileMap::write_cache`] for `root_dir`. Any
@@ -92,13 +106,20 @@ impl FileMap {
         root_dir: &str,
         config: FileMapConfig,
     ) -> Option<(FileMap, CacheExtras)> {
-        let mut reader = BufReader::new(fs::File::open(path).ok()?);
+        let file_handle = fs::File::open(path).ok()?;
+        let len = file_handle.metadata().ok()?.len();
+        let mut reader = BufReader::new(file_handle);
         let mut magic = [0u8; 8];
         std::io::Read::read_exact(&mut reader, &mut magic).ok()?;
         if magic != MAGIC {
             return None;
         }
-        let file: CacheFile = bincode::deserialize_from(reader).ok()?;
+        // The limit keeps a corrupt length prefix from allocating more than
+        // the file could hold.
+        let file: CacheFile = bincode_options()
+            .with_limit(len)
+            .deserialize_from(reader)
+            .ok()?;
         if file.format_version != FORMAT_VERSION || file.root_dir != root_dir {
             return None;
         }
