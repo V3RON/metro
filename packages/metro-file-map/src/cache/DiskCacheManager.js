@@ -104,6 +104,27 @@ export class DiskCacheManager implements CacheManager {
     getSnapshot: () => CacheData,
     opts: CacheManagerWriteOptions,
   ): Promise<void> {
+    return this._writeWith(getSnapshot, data => this.#writeFile(data), opts);
+  }
+
+  async #writeFile(data: CacheData): Promise<void> {
+    await fsPromises.writeFile(this.#cachePath, serialize(data));
+    debug('Written cache to %s', this.#cachePath);
+  }
+
+  /**
+   * Internal, for FileMap's Rust core, which keeps its data in its own cache
+   * file and so has no `CacheData`. It is `write` with the snapshot and the
+   * writing of it supplied by the caller (`persist` is called with what
+   * `getSnapshot` returned): the same `changedSinceCacheRead`, the same
+   * auto-save with its debounce on `eventSource`, the same sequencing of
+   * writes and the same `onWriteError`.
+   */
+  async _writeWith<T>(
+    getSnapshot: () => T,
+    persist: T => Promise<void> | void,
+    opts: CacheManagerWriteOptions,
+  ): Promise<void> {
     const {changedSinceCacheRead, eventSource, onWriteError} = opts;
     // Initialise a writer function using a promise queue to ensure writes are
     // sequenced.
@@ -115,8 +136,7 @@ export class DiskCacheManager implements CacheManager {
           }
           const data = getSnapshot();
           this.#hasUnwrittenChanges = false;
-          await fsPromises.writeFile(this.#cachePath, serialize(data));
-          debug('Written cache to %s', this.#cachePath);
+          await persist(data);
         })
         .catch(onWriteError);
       return this.#writePromise;

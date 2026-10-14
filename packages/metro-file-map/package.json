@@ -25,6 +25,7 @@
     "graceful-fs": "^4.2.4",
     "invariant": "^2.2.4",
     "jest-worker": "^29.7.0",
+    "metro-rust-switch": "0.87.1",
     "nullthrows": "^1.1.1"
   },
   "devDependencies": {

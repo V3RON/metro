@@ -22,6 +22,8 @@ export type DependencyPluginOptions = Readonly<{
 }>;
 
 export default class DependencyPlugin extends FileDataPlugin<ReadonlyArray<string> | null> {
+  readonly #computeDependencies: boolean;
+
   constructor(options: DependencyPluginOptions) {
     const {dependencyExtractor, computeDependencies} = options;
 
@@ -59,6 +61,21 @@ export default class DependencyPlugin extends FileDataPlugin<ReadonlyArray<strin
         return !excludedExtensions.has(ext);
       },
     });
+    this.#computeDependencies = computeDependencies;
+  }
+
+  /**
+   * Internal, for FileMap's Rust core: the data form of the worker's `filter`,
+   * which it applies itself.
+   */
+  _getRustFilter(): Readonly<{
+    other: boolean,
+    excludedExtensions: ReadonlyArray<string>,
+  }> {
+    return {
+      other: this.#computeDependencies,
+      excludedExtensions: [...excludedExtensions],
+    };
   }
 
   getDependencies(mixedPath: Path): ?ReadonlyArray<string> {

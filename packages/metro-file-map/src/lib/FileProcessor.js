@@ -137,6 +137,44 @@ export class FileProcessor {
     return {errors};
   }
 
+  /**
+   * Runs plugin workers on files, for the Rust core, which has decided what to
+   * run (`pluginsToRun`: indices of the plugin workers, per file) and does
+   * the hashing itself. Like `processBatch`, it uses a worker farm when there
+   * are enough files. Resolves with each file's result, in order: the data of
+   * each plugin (a value or `undefined`), or the error the worker threw.
+   */
+  async processPluginJobs(
+    jobs: ReadonlyArray<
+      Readonly<{normalPath: string, pluginsToRun: ReadonlyArray<number>}>,
+    >,
+  ): Promise<
+    Array<
+      {pluginData: ReadonlyArray<V8Serializable>} | {error: MaybeCodedError},
+    >,
+  > {
+    const numWorkers = Math.min(
+      this.#maxWorkers,
+      Math.ceil(jobs.length / this.#maxFilesPerWorker),
+    );
+    const batchWorker = this.#getBatchWorker(numWorkers);
+    const results = await Promise.all(
+      jobs.map(({normalPath, pluginsToRun}) =>
+        batchWorker
+          .processFile({
+            computeSha1: false,
+            filePath: this.#rootPathUtils.normalToAbsolute(normalPath),
+            maybeReturnContent: false,
+            pluginsToRun,
+          })
+          .then(reply => ({pluginData: reply.pluginData ?? []}))
+          .catch(error => ({error: normalizeWorkerError(error)})),
+      ),
+    );
+    await batchWorker.end();
+    return results;
+  }
+
   processRegularFile(
     normalPath: string,
     fileMetadata: FileMetadata,
