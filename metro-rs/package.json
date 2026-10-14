@@ -1,0 +1,11 @@
+{
+  "name": "metro-rs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native (Rust) core of the Metro port, loaded through napi-rs.",
+  "main": "index.js",
+  "scripts": {
+    "build": "cargo build --release --locked && node scripts/copy-binary.js"
+  },
+  "license": "MIT"
+}

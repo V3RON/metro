@@ -1,0 +1,19 @@
+[package]
+name = "metro-rs-binding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "napi-rs binding that exposes the Metro Rust core to Node."
+
+[lib]
+name = "metro_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+metro-rs-core = { path = "../core" }
+napi = { version = "2", default-features = false, features = ["napi4"] }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"

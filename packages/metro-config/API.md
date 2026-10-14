@@ -99,6 +99,7 @@ export type MetalConfigT = {
   unstable_fileMapPlugins?: ReadonlyArray<InputFileMapPlugin> | undefined;
   maxWorkers: number;
   unstable_perfLoggerFactory?: null | undefined | PerfLoggerFactory;
+  unstable_rust: {[componentId: string]: boolean};
   projectRoot: string;
   stickyWorkers: boolean;
   transformerPath: string;

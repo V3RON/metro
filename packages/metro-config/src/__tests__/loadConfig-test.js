@@ -147,6 +147,24 @@ describe('loadConfig', () => {
     }
   });
 
+  test('defaults `unstable_rust` to an empty object and accepts a map', async () => {
+    const defaults = await loadConfig({cwd: FIXTURES});
+    expect(defaults.unstable_rust).toEqual({});
+
+    const config = await loadConfig(
+      {cwd: FIXTURES},
+      {unstable_rust: {resolver: true}},
+    );
+    expect(config.unstable_rust).toEqual({resolver: true});
+  });
+
+  test('validates the type of `unstable_rust`', async () => {
+    await expect(
+      // $FlowFixMe[incompatible-type] deliberately invalid
+      loadConfig({cwd: FIXTURES}, {unstable_rust: 'resolver'}),
+    ).rejects.toThrow(/unstable_rust/);
+  });
+
   test('injects `metro-cache` into the `cacheStores` callback', async () => {
     const result = await loadConfig({
       config: path.resolve(FIXTURES, 'cachestores.config.js'),
