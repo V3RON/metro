@@ -7,6 +7,7 @@ members = [
   "crates/cache-key",
   "crates/resolver",
   "crates/file-store",
+  "crates/haste",
   "crates/binding",
 ]
 
