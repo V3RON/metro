@@ -129,23 +129,22 @@ The rest is the graph build and serialisation. Szymon therefore moved the target
 
 Szymon accepted phase 3 on 2026-10-14 as it stands at the head of `port/phase-3`.
 
-**State when accepted.** The last full cloud `./gate.sh --report` ran at f88b89f (medians of 5, Linux Xeon):
+**State when accepted.** The final cloud `./gate.sh --report` ran at 992e869, the head that was merged, with the after-GC memory check (main 4d4092d) and the native-memory trim. It is committed as `port/reports/phase-3.md`. Medians of 5, Linux Xeon:
 
 | Scenario | Speed-up | Target |
 |---|---:|---|
-| micro:file-map | 6.05× | 3× |
-| warm-build | 1.40× | 1.3× |
-| micro:resolver | 1.46× | – |
-| micro:source-map | 2.23× | – |
-| cold-filemap | 1.35× | informational; moved to phase 5 |
+| micro:file-map | 4.92× | 3× |
+| warm-build | **1.19×** | 1.3× (missed; accepted by Szymon) |
+| micro:resolver | 1.79× | – |
+| micro:source-map | 2.26× | – |
+| cold-filemap | 1.26× | informational; moved to phase 5 |
+| cold-build | 1.09× | – |
+| edit | 1.07× | – |
 
 - **Compile and tests gates:** passed, including Jest with `file-map`, `node-haste` and `cache` in Rust plus `METRO_RUST_VERIFY`.
 - **Bundles:** byte-identical.
-- **The one failure:** the edit scenario's peak memory, +11% against a 10% limit. Two things came after that report:
-  - main's switch to resident memory after a forced GC (4d4092d), merged into this branch;
-  - the native-memory trim after the first build (992e869).
-
-  No full report has been run with both. Phase 4 starts by running one.
+- **Memory:** every scenario passes the after-GC check. Warm-build is 326 → 332 MB, and edit is 441 → 419 MB.
+- **The one miss:** warm-build at 1.19× (1.20× in the run before). Earlier runs at f88b89f gave 1.37× and 1.40×, but they were on this container before it restarted; since then pure JS is faster (about 3.3 s to 2.8 s) and Rust is unchanged (about 2.33 s). Where the remaining Rust warm-build time goes has not been profiled yet; phase 4 starts with that profile.
 
 ### Potential improvements
 
