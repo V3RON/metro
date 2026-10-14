@@ -149,12 +149,21 @@ impl Walker<'_> {
             }
         };
 
+        // An error from the directory stream fails the whole `readdir` call in
+        // JS: nothing from this directory is kept, and it warns like an
+        // initial failure.
+        let entries = match collect_entries(read_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                return Found {
+                    files: Vec::new(),
+                    warnings: vec![readdir_warning(&err, directory)],
+                }
+            }
+        };
+
         let mut tasks = Vec::new();
-        for entry in read_dir {
-            // An error from the directory stream itself ends the listing, the
-            // way an error in the middle of a `readdir` fails the whole call;
-            // here only the entries read so far are kept.
-            let Ok(entry) = entry else { break };
+        for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
             let file = format!("{dir_prefix}{name}");
 
@@ -234,6 +243,14 @@ impl Walker<'_> {
         }
         found
     }
+}
+
+/// All the entries of a directory stream, or the first error: `readdir` is
+/// all or nothing.
+fn collect_entries<T>(
+    entries: impl Iterator<Item = std::io::Result<T>>,
+) -> std::io::Result<Vec<T>> {
+    entries.collect()
 }
 
 /// `Error "${err.code ?? err.message}" reading contents of "${directory}", ...`
