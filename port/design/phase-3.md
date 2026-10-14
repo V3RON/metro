@@ -93,6 +93,10 @@ metro-cache's `FileStore` stores transform results. Those stay in the JS heap un
 - **One extra timer tick per task.** After each task, `FileMap` waits one timer tick (`await sleep(0)` from `node:timers/promises`) before going on. That lets Node destroy the task's async resource first. Without it, `server-torn-down-test` sees the resource still alive when `onClose` runs. The cost is about 1 ms per build.
 - **napi3, not napi4.** The binding is built with napi3. napi4 makes napi-rs create a module-lifetime "CustomGC" threadsafe function, which that test also caught, and nothing in the port uses threadsafe functions.
 
+## micro:resolver in phase 3
+
+Phase 2's micro:resolver timed a rebuild of the resolver's replica, because that replica only existed on the Rust side. In phase 3 the resolver's store is the file map itself, which both sides build before timing. The benchmark now rebuilds the store only when it is a phase 2 replica, i.e. one with a `rebuild()` method. The package caches still start equally warm on both sides, as Szymon decided in phase 2.
+
 ## Departures from js-rust-boundary.md
 
 - **Watchers stay in JS** (the brief's default). They feed batches into Rust; the boundary note had Rust batching watcher events with a `ThreadsafeFunction`.
