@@ -1,0 +1,19 @@
+{
+ "emptyRustToJs": 30,
+ "fileSystemLookup": {
+  "jsToJs": 34,
+  "rustToJs": 400,
+  "realJsCallbackJsToJs": 379
+ },
+ "getPackageForModule": {
+  "jsToJs": 31,
+  "rustToJsHandleOnly": 777,
+  "rustToJsJsonConvert": 31703
+ },
+ "resolveHastePackage": {
+  "jsToJs": 26,
+  "rustToJs": 119
+ },
+ "jsToRustReadContext": 3059,
+ "jsToRustNoopString": 78
+}

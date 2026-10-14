@@ -13,6 +13,8 @@ use metro_rs_source_map::generator::AddError;
 use napi::bindgen_prelude::{Buffer, Int32Array};
 use napi_derive::napi;
 
+pub mod resolver;
+
 /// Version of the Rust core.
 #[napi]
 pub fn version() -> String {

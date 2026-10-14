@@ -1,0 +1,13 @@
+[package]
+name = "metro-rs-file-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Read replica of metro-file-map's TreeFS plus Metro's PackageCache, pure Rust."
+
+[dependencies]
+metro-rs-resolver = { path = "../resolver" }
+# `preserve_order` keeps JSON key order. `float_roundtrip` makes number parsing
+# correctly rounded, like V8's JSON.parse (no new crate, a feature of serde_json).
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

@@ -5,6 +5,8 @@ members = [
   "crates/ob1",
   "crates/source-map",
   "crates/cache-key",
+  "crates/resolver",
+  "crates/file-store",
   "crates/binding",
 ]
 

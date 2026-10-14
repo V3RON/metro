@@ -33,6 +33,11 @@ import {
   redirectModulePath,
 } from './PackageResolve';
 import resolveAsset from './resolveAsset';
+import {
+  getResolverBinding,
+  resolveWithRust,
+  setMissingFileInHastePackageError,
+} from './rust';
 import isAssetFile from './utils/isAssetFile';
 import {posixToSystemPath} from './utils/paths';
 import path from 'node:path';
@@ -62,6 +67,13 @@ export default function resolve(
       specifier,
       platform,
     );
+  }
+
+  // The `resolver` component of the Rust port (METRO_RUST), behind this
+  // public function so every caller and test goes through the switch.
+  const rustBinding = getResolverBinding(context);
+  if (rustBinding != null) {
+    return resolveWithRust(rustBinding, context, specifier, platform, resolve);
   }
 
   let schemeError: ?FailedToResolveUnsupportedError;
@@ -590,6 +602,8 @@ class MissingFileInHastePackageError extends Error {
     Object.assign(this, opts);
   }
 }
+
+setMissingFileInHastePackageError(MissingFileInHastePackageError);
 
 /**
  * Resolve a package entry point or subpath target.

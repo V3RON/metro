@@ -98,7 +98,7 @@ impl Encoder {
         carry_over: i32,
     ) -> Result<(), EncodeError> {
         self.generator.start_file();
-        for (i, t) in tuples.chunks_exact(TUPLE_STRIDE).enumerate() {
+        for (i, t) in tuples.as_chunks::<TUPLE_STRIDE>().0.iter().enumerate() {
             let line = t[0].wrapping_add(carry_over);
             match t[4] {
                 NO_NAME_SIMPLE => self.generator.add_simple_mapping(line, t[1])?,

@@ -25,6 +25,7 @@
     "metro": "0.87.1"
   },
   "dependencies": {
-    "flow-enums-runtime": "^0.0.6"
+    "flow-enums-runtime": "^0.0.6",
+    "metro-rust-switch": "0.87.1"
   }
 }

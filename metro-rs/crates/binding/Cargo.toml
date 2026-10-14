@@ -14,8 +14,11 @@ crate-type = ["cdylib"]
 metro-rs-core = { path = "../core" }
 metro-rs-source-map = { path = "../source-map" }
 metro-rs-cache-key = { path = "../cache-key" }
+metro-rs-file-store = { path = "../file-store" }
+metro-rs-resolver = { path = "../resolver" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [build-dependencies]
 napi-build = "2"
