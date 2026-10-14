@@ -1172,9 +1172,22 @@ fn building_the_fixture_matches_the_js_file_map() {
             },
         };
         let mut map = FileMap::new(&root_dir, config);
-        let (diff, warnings) = map.node_crawl(&options, None).unwrap();
+        let (mut diff, warnings) = map.node_crawl(&options, None).unwrap();
         if unreadable_dir_is_unreadable(&dir) {
             assert!(warnings.len() <= 1, "{name}: {warnings:?}");
+        } else {
+            // Running as root: the directory the JS recording could not read
+            // is readable, and JS run as root lists it too. Drop it so the
+            // rest of the map is still compared with the recording.
+            let hidden: Vec<String> = diff
+                .changed_files
+                .keys()
+                .filter(|path| path.starts_with("unreadable_dir/"))
+                .map(str::to_string)
+                .collect();
+            for path in hidden {
+                diff.changed_files.remove(&path);
+            }
         }
         let session = map.begin_delta(diff).unwrap();
         // The plugin workers' answers are the JS ones: the test checks which
