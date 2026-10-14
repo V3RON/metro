@@ -15,6 +15,7 @@ use napi_derive::napi;
 
 pub mod file_map;
 pub mod resolver;
+pub mod transform_cache;
 
 /// Version of the Rust core.
 #[napi]
