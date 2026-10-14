@@ -130,14 +130,20 @@ export function getResolverBinding(
   return null;
 }
 
+let lastMetroRustVerify: ?string;
+let lastVerify = false;
+
 /** Whether lookups are checked against the JS callbacks (METRO_RUST_VERIFY). */
 function isVerifyEnabled(): boolean {
   const verify = process.env.METRO_RUST_VERIFY;
-  return (
-    verify != null &&
-    verify !== '' &&
-    isRustEnabled('resolver', null, {METRO_RUST: verify})
-  );
+  if (verify !== lastMetroRustVerify) {
+    lastMetroRustVerify = verify;
+    lastVerify =
+      verify != null &&
+      verify !== '' &&
+      isRustEnabled('resolver', null, {METRO_RUST: verify});
+  }
+  return lastVerify;
 }
 
 // The context of the innermost Rust resolve in progress, read by the

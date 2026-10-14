@@ -106,7 +106,7 @@ pub fn match_subpath_from_exports_like<'a>(
     platform: Option<&str>,
     create_config_error: &dyn Fn(String) -> ResolveError,
 ) -> Result<(Option<&'a str>, Option<String>), ResolveError> {
-    let mut condition_names: HashSet<&str> = HashSet::new();
+    let mut condition_names = ConditionNames::default();
     condition_names.insert("default");
     condition_names.insert(if ctx.request.is_esm_import {
         "import"
@@ -178,11 +178,38 @@ pub fn match_subpath_from_exports_like<'a>(
     Ok((target, pattern_match))
 }
 
+/// The JS `Set` of condition names. A handful of names, so a list is the
+/// cheapest set (no hashing).
+#[derive(Default)]
+pub struct ConditionNames<'a>(Vec<&'a str>);
+
+impl<'a> ConditionNames<'a> {
+    pub fn insert(&mut self, name: &'a str) {
+        if !self.contains(name) {
+            self.0.push(name);
+        }
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(&name)
+    }
+}
+
+impl<'a> FromIterator<&'a str> for ConditionNames<'a> {
+    fn from_iter<I: IntoIterator<Item = &'a str>>(iter: I) -> Self {
+        let mut names = ConditionNames::default();
+        for name in iter {
+            names.insert(name);
+        }
+        names
+    }
+}
+
 /// Reduce an "exports"-like mapping to a flat subpath mapping after resolving
 /// conditional exports.
 pub fn reduce_exports_like_map<'a>(
     exports_like_map: &'a NormalizedExportsLikeMap<'a>,
-    condition_names: &HashSet<&str>,
+    condition_names: &ConditionNames<'_>,
     create_config_error: &dyn Fn(String) -> ResolveError,
 ) -> Result<FlattenedExportMap<'a>, ResolveError> {
     let mut result: FlattenedExportMap<'a> = Vec::new();
@@ -228,7 +255,7 @@ static NULL: Value = Value::Null;
 /// See https://nodejs.org/docs/latest-v19.x/api/packages.html#conditional-exports.
 fn reduce_conditional_export<'a>(
     subpath_value: &'a Value,
-    condition_names: &HashSet<&str>,
+    condition_names: &ConditionNames<'_>,
 ) -> Reduced<'a> {
     let mut reduced_value = subpath_value;
 
@@ -299,7 +326,7 @@ mod tests {
 
     #[test]
     fn reduce_follows_key_order_and_default() {
-        let names: HashSet<&str> = ["default", "require"].into_iter().collect();
+        let names: ConditionNames<'_> = ["default", "require"].into_iter().collect();
         let err = |r: String| ResolveError::invalid_package_configuration(r, "/p");
         let v1 = json!({"import": "./esm.js", "require": "./cjs.js", "default": "./d.js"});
         let v2 = json!({"default": "./d.js", "require": "./cjs.js"});
@@ -328,7 +355,7 @@ mod tests {
 
     #[test]
     fn reduce_rejects_non_relative_targets() {
-        let names: HashSet<&str> = ["default"].into_iter().collect();
+        let names: ConditionNames<'_> = ["default"].into_iter().collect();
         let err = |r: String| ResolveError::invalid_package_configuration(r, "/p");
         let v = json!("foo.js");
         let map: NormalizedExportsLikeMap = vec![(".", Cow::Borrowed(&v))];
