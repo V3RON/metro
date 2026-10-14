@@ -86,6 +86,13 @@ metro-cache's `FileStore` stores transform results. Those stay in the JS heap un
 
 `notify` and `watchman_client` are not added this phase.
 
+## Off the main thread
+
+- **What runs on worker threads.** The crawl, the hashing, readlink and the cache file I/O run as napi `AsyncTask`s. The tree stays on the main thread, and only plain data crosses to the workers.
+- **Why.** An earlier version did this work synchronously, which blocked the event loop for about 100 ms during a dev server's start.
+- **One extra timer tick per task.** After each task, `FileMap` waits one timer tick (`await sleep(0)` from `node:timers/promises`) before going on. That lets Node destroy the task's async resource first. Without it, `server-torn-down-test` sees the resource still alive when `onClose` runs. The cost is about 1 ms per build.
+- **napi3, not napi4.** The binding is built with napi3. napi4 makes napi-rs create a module-lifetime "CustomGC" threadsafe function, which that test also caught, and nothing in the port uses threadsafe functions.
+
 ## Departures from js-rust-boundary.md
 
 - **Watchers stay in JS** (the brief's default). They feed batches into Rust; the boundary note had Rust batching watcher events with a `ThreadsafeFunction`.
