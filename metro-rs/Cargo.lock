@@ -202,7 +202,9 @@ version = "0.1.0"
 dependencies = [
  "metro-rs-cache-key",
  "metro-rs-core",
+ "metro-rs-file-map",
  "metro-rs-file-store",
+ "metro-rs-haste",
  "metro-rs-resolver",
  "metro-rs-source-map",
  "napi",

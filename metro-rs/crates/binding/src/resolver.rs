@@ -7,12 +7,14 @@
 //! One call per resolve. Callbacks Rust cannot answer natively go through one
 //! JS trampoline, synchronously, while no mutable borrow is held.
 
+use crate::file_map::NativeFileMap;
 use metro_rs_file_store::{EntryKind, FileStore as Store, StoreAnswer};
+use metro_rs_haste::{HasteError, HasteMap};
 use metro_rs_resolver::{
     FileAndDirCandidates, FileCandidates, HostError, Lookup, PackageForModule, PackageJson,
     Resolution, ResolveError, ResolveRequest, ResolverConfig as Config, ResolverHost,
 };
-use napi::bindgen_prelude::{ClassInstance, Uint8Array};
+use napi::bindgen_prelude::{ClassInstance, Either, Uint8Array};
 use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result, ValueType};
 use napi_derive::napi;
 use serde_json::Value;
@@ -30,6 +32,7 @@ const NATIVE_GET_PACKAGE: u32 = 32;
 const NATIVE_GET_PACKAGE_FOR_MODULE: u32 = 64;
 const VERIFY: u32 = 128;
 const EXTRA_NODE_MODULES: u32 = 256;
+const NATIVE_HASTE: u32 = 512;
 
 // Trampoline indices. Keep in sync with metro-resolver/src/rust.js.
 const CB_FILE_SYSTEM_LOOKUP: u32 = 0;
@@ -201,6 +204,27 @@ impl FileStore {
 
 // ----------------------------------------------------------------- the host
 
+/// The store behind a resolve: phase 2's replica, or the tree of the Rust
+/// file map (which also holds Haste).
+#[derive(Clone, Copy)]
+enum StoreRef<'a> {
+    Replica(&'a RefCell<Store>),
+    FileMap(&'a NativeFileMap),
+}
+
+impl StoreRef<'_> {
+    /// Runs `query` on the store. `None` if the store is being changed.
+    fn query<R>(&self, query: impl FnOnce(&Store) -> R) -> Option<R> {
+        match self {
+            StoreRef::Replica(cell) => {
+                let store = cell.try_borrow().ok()?;
+                Some(query(&store))
+            }
+            StoreRef::FileMap(map) => map.with_store(query),
+        }
+    }
+}
+
 /// Answers the resolver's lookups for one `resolverResolve` call: natively
 /// from the store for the callbacks flagged as native, otherwise (and when the
 /// store defers) through the JS trampoline.
@@ -209,7 +233,9 @@ struct Host<'a> {
     callback: &'a JsFunction,
     // Borrowed only for the duration of each native query, never while JS
     // runs, so a callback may change the store (rule 8).
-    store: Option<&'a RefCell<Store>>,
+    store: Option<StoreRef<'a>>,
+    /// The platform of the resolve, which Metro's Haste callbacks are bound to.
+    platform: Option<&'a str>,
     flags: u32,
 }
 
@@ -244,8 +270,23 @@ impl Host<'_> {
         if !self.has(flag) {
             return None;
         }
-        let store = self.store?.try_borrow().ok()?;
-        query(&store).ok()
+        self.store?.query(|store| query(store).ok())?
+    }
+
+    /// Runs a Haste query natively when the callback is flagged as native and
+    /// the store is a file map with a Haste map. `None` (ask JS instead) also
+    /// when Haste reports an error, so that JS throws its own error class.
+    fn native_haste(
+        &self,
+        query: impl FnOnce(&HasteMap) -> std::result::Result<Option<String>, HasteError>,
+    ) -> Option<Option<String>> {
+        if !self.has(NATIVE_HASTE) {
+            return None;
+        }
+        let StoreRef::FileMap(map) = self.store? else {
+            return None;
+        };
+        map.with_haste(query)?.ok()
     }
 
     /// Calls the trampoline. A callback that threw comes back as a symbol.
@@ -482,11 +523,31 @@ impl ResolverHost for Host<'_> {
     }
 
     fn resolve_haste_module(&self, name: &str) -> std::result::Result<Option<String>, HostError> {
-        self.js_string_or_null(CB_RESOLVE_HASTE_MODULE, &[name])
+        // `getHasteModulePath`: `hasteMap.getModule(name, platform, true)`.
+        match self.native_haste(|haste| haste.get_module(name, self.platform, true, None)) {
+            Some(native) => self.verify(
+                "resolveHasteModule",
+                name,
+                native,
+                || self.js_string_or_null(CB_RESOLVE_HASTE_MODULE, &[name]),
+                |a, b| a == b,
+            ),
+            None => self.js_string_or_null(CB_RESOLVE_HASTE_MODULE, &[name]),
+        }
     }
 
     fn resolve_haste_package(&self, name: &str) -> std::result::Result<Option<String>, HostError> {
-        self.js_string_or_null(CB_RESOLVE_HASTE_PACKAGE, &[name])
+        // `getHastePackagePath`: `hasteMap.getPackage(name, platform, true)`.
+        match self.native_haste(|haste| haste.get_package(name, self.platform, true)) {
+            Some(native) => self.verify(
+                "resolveHastePackage",
+                name,
+                native,
+                || self.js_string_or_null(CB_RESOLVE_HASTE_PACKAGE, &[name]),
+                |a, b| a == b,
+            ),
+            None => self.js_string_or_null(CB_RESOLVE_HASTE_PACKAGE, &[name]),
+        }
     }
 
     fn resolve_asset(
@@ -544,7 +605,7 @@ impl ResolverHost for Host<'_> {
 pub fn resolver_resolve(
     env: Env,
     config: &ResolverConfig,
-    store: Option<ClassInstance<FileStore>>,
+    store: Option<Either<ClassInstance<FileStore>, ClassInstance<NativeFileMap>>>,
     origin_module_path: String,
     specifier: String,
     platform: Option<String>,
@@ -554,7 +615,11 @@ pub fn resolver_resolve(
     let host = Host {
         env: &env,
         callback: &callback,
-        store: store.as_ref().map(|store| &store.store),
+        store: store.as_ref().map(|store| match store {
+            Either::A(replica) => StoreRef::Replica(&replica.store),
+            Either::B(file_map) => StoreRef::FileMap(file_map),
+        }),
+        platform: platform.as_deref(),
         flags,
     };
     let options = Value::Object(Default::default());
