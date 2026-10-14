@@ -209,7 +209,7 @@ pub fn resolve_default(
         // An absolute path inside the file may not match the system's path separator
         path::is_absolute(redirected) || path::win32_is_absolute(redirected) {
             return Err(ResolveError::InvalidPackageConfigurationError {
-                package_path: closest.root_path.clone(),
+                package_path: closest.root_path.to_string(),
                 reason: format!(
                     "Attempted to redirect import to an absolute path. \
                      This is not allowed by the \"browser\" spec.\
@@ -435,6 +435,7 @@ fn resolve_module_from_target_path(
     let candidate = match redirect_module_path(ctx, target_path)? {
         Redirect::Ignored => return Ok(Some(Resolution::Empty)),
         Redirect::Path(p) => p,
+        Redirect::Unchanged => target_path.to_string(),
     };
 
     // candidate should be absolute here - we assume that redirectModulePath
@@ -549,6 +550,7 @@ fn resolve_module_path(
     let redirected_path = match redirect_module_path(ctx, &module_path)? {
         Redirect::Ignored => return Ok(Attempt::Resolved(Resolution::Empty)),
         Redirect::Path(p) => p,
+        Redirect::Unchanged => module_path,
     };
 
     let dir_path = path::dirname(&redirected_path);
@@ -841,17 +843,20 @@ fn resolve_source_file_for_ext(
     context: &mut SourceFileContext<'_, '_>,
     extension: &str,
 ) -> Result<Option<SourceFileResolution>, ResolveError> {
-    let file_path = format!("{}{extension}", context.file_path_prefix);
+    let mut file_path = String::with_capacity(context.file_path_prefix.len() + extension.len());
+    file_path.push_str(context.file_path_prefix);
+    file_path.push_str(extension);
     let redirected_path =
         // Any redirections for the bare path have already happened
         if !extension.is_empty() {
             redirect_module_path(context.ctx, &file_path)?
         } else {
-            Redirect::Path(file_path)
+            Redirect::Unchanged
         };
     let redirected_path = match redirected_path {
         Redirect::Ignored => return Ok(Some(SourceFileResolution::Empty)),
         Redirect::Path(p) => p,
+        Redirect::Unchanged => file_path,
     };
     if let Lookup::File { real_path } = context.ctx.host().file_system_lookup(&redirected_path)? {
         return Ok(Some(SourceFileResolution::Path(real_path)));

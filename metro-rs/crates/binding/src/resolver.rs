@@ -289,8 +289,8 @@ impl Host<'_> {
                 .map_err(napi_to_host)
         };
         Ok(Some(PackageForModule {
-            root_path: get(0)?,
-            package_relative_path: get(1)?,
+            root_path: get(0)?.into(),
+            package_relative_path: get(1)?.into(),
             package_json: parse_package_json(&get(2)?)?,
         }))
     }

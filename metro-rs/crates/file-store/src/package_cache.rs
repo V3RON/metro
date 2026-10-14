@@ -13,7 +13,13 @@ use metro_rs_resolver::path;
 use metro_rs_resolver::PackageForModule;
 use serde_json::Value;
 use std::cell::RefCell;
+use crate::tree::FxHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
+
+// Keyed by absolute paths on every resolver lookup; FxHash as in the tree.
+type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+type FxHashSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
 use std::sync::Arc;
 
 /// An answer, or a request that the caller ask Metro's JS callback instead
@@ -38,13 +44,13 @@ struct CachedPackage {
 
 #[derive(Default)]
 struct Caches {
-    package_cache: HashMap<String, CachedPackage>,
+    package_cache: FxHashMap<String, CachedPackage>,
     // Single cache: module path -> pre-built result object, or None (no package)
-    result_by_module_path: HashMap<String, Option<PackageForModule>>,
+    result_by_module_path: FxHashMap<String, Option<PackageForModule>>,
     // Reverse index for invalidation: package.json path -> set of module paths
-    module_paths_by_package_path: HashMap<String, HashSet<String>>,
+    module_paths_by_package_path: FxHashMap<String, FxHashSet<String>>,
     // Module paths that resolved to no package.json (None), for invalidation
-    module_paths_with_no_package: HashSet<String>,
+    module_paths_with_no_package: FxHashSet<String>,
 }
 
 pub struct PackageCache {
@@ -148,8 +154,8 @@ impl PackageCache {
         // Cache the pre-built result object
         let result = PackageForModule {
             package_json: pkg.package_json,
-            package_relative_path,
-            root_path: pkg.root_path,
+            package_relative_path: package_relative_path.into(),
+            root_path: pkg.root_path.into(),
         };
         self.caches
             .borrow_mut()

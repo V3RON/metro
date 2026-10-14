@@ -112,9 +112,9 @@ impl MemoryHost {
             let candidate = path::join(&[&dir, "package.json"]);
             if let Some(package_json) = self.package(&candidate) {
                 return Some(PackageForModule {
-                    root_path: dir.clone(),
+                    root_path: dir.clone().into(),
                     package_json,
-                    package_relative_path: path::relative(&dir, module_path),
+                    package_relative_path: path::relative(&dir, module_path).into(),
                 });
             }
 

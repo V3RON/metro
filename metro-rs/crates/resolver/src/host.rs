@@ -21,13 +21,14 @@ pub enum Lookup {
     Dir { real_path: String },
 }
 
-/// `types.js` `PackageForModule`.
+/// `types.js` `PackageForModule`. Hosts cache these and hand out clones on
+/// every lookup, so the strings are shared rather than copied.
 #[derive(Debug, Clone)]
 pub struct PackageForModule {
-    pub root_path: String,
+    pub root_path: Arc<str>,
     /// A system-separated subpath (with no './' prefix) that reflects the
     /// subpath of the given candidate relative to `root_path`.
-    pub package_relative_path: String,
+    pub package_relative_path: Arc<str>,
     pub package_json: PackageJson,
 }
 

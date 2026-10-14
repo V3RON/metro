@@ -13,6 +13,8 @@ use serde_json::Value;
 pub enum Redirect {
     Path(String),
     Ignored,
+    /// No rule applies: the input path, unchanged (saves copying it).
+    Unchanged,
 }
 
 /// The subpath, or set of subpath variants, to match.
@@ -104,9 +106,16 @@ pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Result<Redirect
 
     let containing_package = match containing_package {
         // No package.json rules apply
-        None => return Ok(Redirect::Path(module_path.to_string())),
+        None => return Ok(Redirect::Unchanged),
         Some(p) => p,
     };
+
+    // `matchSubpathFromMainFields` matches nothing unless a main field is a
+    // map, whatever the subpath, so skip building the subpath (the JS builds
+    // it, with the same result).
+    if !has_replacement_map(&containing_package.package_json, main_fields) {
+        return Ok(Redirect::Unchanged);
+    }
 
     let mut redirected_path: Option<Redirect>;
 
@@ -114,7 +123,7 @@ pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Result<Redirect
         let package_relative_module_path = if is_module_path_absolute {
             // If the module path is absolute, containingPackage is relative to
             // it (see above).
-            containing_package.package_relative_path.clone()
+            containing_package.package_relative_path.to_string()
         } else {
             // Otherwise containingPackage is relative to the origin module.
             // Origin's package-relative directory joined with the target
@@ -157,7 +166,16 @@ pub fn redirect_module_path(ctx: &Ctx<'_>, module_path: &str) -> Result<Redirect
         );
     }
 
-    Ok(redirected_path.unwrap_or_else(|| Redirect::Path(module_path.to_string())))
+    Ok(redirected_path.unwrap_or(Redirect::Unchanged))
+}
+
+/// Whether any of `main_fields` is an object in `pkg`. Only object values can
+/// hold replacements (JS also merges arrays and numbers, whose keys are array
+/// indices, which never equal a subpath variant).
+fn has_replacement_map(pkg: &Value, main_fields: &[String]) -> bool {
+    main_fields
+        .iter()
+        .any(|field| matches!(pkg.get(field.as_str()), Some(Value::Object(_))))
 }
 
 /// Get the mapped replacement for the given subpath defined by matching
@@ -177,6 +195,10 @@ pub fn match_subpath_from_main_fields(
     pkg: &Value,
     main_fields: &[String],
 ) -> Option<Redirect> {
+    // As in the JS, nothing is allocated when no main field is a map.
+    if !has_replacement_map(pkg, main_fields) {
+        return None;
+    }
     let expanded;
     let variants: &[String] = match subpath {
         Subpath::Variants(v) => v,
