@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/binding"]
+members = [
+  "crates/core",
+  "crates/ob1",
+  "crates/source-map",
+  "crates/cache-key",
+  "crates/binding",
+]
 
 [workspace.package]
 version = "0.1.0"
