@@ -123,6 +123,7 @@ export default function createFileMap(
     resetCache: config.resetCache,
     rootDir: config.projectRoot,
     roots: config.watchFolders,
+    unstable_rust: config.unstable_rust,
     useWatchman: config.resolver.useWatchman,
     watch,
     watchmanDeferStates: config.watcher.watchman.deferStates,

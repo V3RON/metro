@@ -14,10 +14,12 @@
  * that do not exist) are part of the workload and are counted.
  *
  * When the resolver runs in Rust, Metro's callbacks are tagged with the Rust
- * replica of its file map (Symbol.for('metro.resolver.fileStore'), see
- * port/design/boundary.md). The timed region then starts by rebuilding that
- * replica's file tree from the JS file map, so the Rust side pays for the
- * replica it needs; the JS side has no replica.
+ * store (Symbol.for('metro.resolver.fileStore'), see port/design/boundary.md).
+ * If that store is a replica of the JS file map (phase 2: only the resolver
+ * in Rust), the timed region starts by rebuilding the replica's file tree, so
+ * the Rust side pays for the replica it needs. If the store is the file map
+ * itself (phase 3: the file map in Rust), there is no replica: each side built
+ * its own file map before timing.
  *
  * Both sides start with the same package.json cache state: warm from the
  * recording build. A rebuild keeps the Rust package cache, as a reload keeps
@@ -80,7 +82,11 @@ exports.run = async ({pkg, app, cache, now}) => {
   const warmUpMs = now() - t;
   const store = recorded[0]?.context.fileSystemLookup[Symbol.for('metro.resolver.fileStore')];
   const start = now();
-  if (store != null) store.rebuild();
+  // Phase 2 (only the resolver in Rust): the store is a replica of the JS
+  // file map, an extra structure, so its rebuild is timed. Phase 3 (the file
+  // map in Rust): the store is the file map itself, which both sides built
+  // during the recording build, so there is nothing extra to time.
+  if (store != null && typeof store.rebuild === 'function') store.rebuild();
   const replicaMs = now() - start;
   const passesMs = [];
   for (let i = 0; i < ITERATIONS; i++) {

@@ -10,7 +10,7 @@
  */
 
 import type {PackageCache} from '../PackageCache';
-import type RustFileStore from './RustFileStore';
+import type {FileStoreHolder} from 'metro-resolver/private/rust';
 import type {ConfigT} from 'metro-config';
 import type {FileSystem, HasteMap} from 'metro-file-map';
 import type {FileSystemLookup} from 'metro-resolver';
@@ -25,9 +25,14 @@ export type CreateModuleResolverOptions = Readonly<{
   fileSystem: FileSystem,
   hasteMap: HasteMap,
   packageCache: PackageCache,
-  // The Rust replica of `fileSystem` and `packageCache`, when the resolver
-  // runs in Rust (METRO_RUST / unstable_rust).
-  rustFileStore?: ?RustFileStore,
+  // The Rust store that answers the callbacks natively, when the resolver
+  // runs in Rust (METRO_RUST / unstable_rust): the replica of `fileSystem` and
+  // `packageCache` (RustFileStore), or `fileSystem` itself when the file map
+  // is in Rust (RustFileSystem).
+  rustFileStore?: ?FileStoreHolder,
+  // Whether `hasteMap` is the Rust file map's own, so that the Rust resolver
+  // answers Haste natively too.
+  nativeHaste?: boolean,
 }>;
 
 export default function createModuleResolver({
@@ -36,6 +41,7 @@ export default function createModuleResolver({
   hasteMap,
   packageCache,
   rustFileStore,
+  nativeHaste,
 }: CreateModuleResolverOptions): ModuleResolver {
   const fileSystemLookup = (filePath: string): ReturnType<FileSystemLookup> => {
     const result = fileSystem.lookup(filePath);
@@ -75,6 +81,18 @@ export default function createModuleResolver({
     }
   }
 
+  const getHasteModulePath = (name: string, platform: ?string) =>
+    hasteMap.getModule(name, platform, true);
+  const getHastePackagePath = (name: string, platform: ?string) =>
+    hasteMap.getPackage(name, platform, true);
+  if (rustFileStore != null && nativeHaste === true) {
+    for (const callback of [getHasteModulePath, getHastePackagePath]) {
+      // $FlowFixMe[invalid-computed-prop]
+      // $FlowFixMe[prop-missing]
+      callback[FILE_STORE] = rustFileStore;
+    }
+  }
+
   return new ModuleResolver({
     assetExts: new Set(config.resolver.assetExts),
     disableHierarchicalLookup: config.resolver.disableHierarchicalLookup,
@@ -82,10 +100,8 @@ export default function createModuleResolver({
     emptyModulePath: config.resolver.emptyModulePath,
     extraNodeModules: config.resolver.extraNodeModules,
     fileSystemLookup,
-    getHasteModulePath: (name, platform) =>
-      hasteMap.getModule(name, platform, true),
-    getHastePackagePath: (name, platform) =>
-      hasteMap.getPackage(name, platform, true),
+    getHasteModulePath,
+    getHastePackagePath,
     getPackage,
     getPackageForModule,
     mainFields: config.resolver.resolverMainFields,

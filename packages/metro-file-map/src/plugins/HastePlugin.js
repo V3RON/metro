@@ -52,6 +52,45 @@ export type HasteMapOptions = Readonly<{
   failValidationOnConflicts: boolean,
 }>;
 
+/**
+ * The Rust file map's Haste map (`NativeFileMap` in metro-rs). A HastePlugin
+ * that FileMap has bound to it answers from the native Haste map, which the
+ * native file map keeps current itself.
+ */
+type NativeHaste = {
+  hasteInitialize(): {files: number, warnings: Array<string>},
+  hasteGetModule(
+    name: string,
+    platform: ?string,
+    supportsNativePlatform: boolean,
+    type: ?number,
+  ): {
+    path?: ?string,
+    error?: {
+      message: string,
+      hasteName: string,
+      platform?: ?string,
+      supportsNativePlatform: boolean,
+      duplicatePaths: Array<string>,
+      duplicateTypes: Array<number>,
+    },
+  },
+  hasteGetModuleNameByPath(mixedPath: string): ?string,
+  hasteAssertValid(): ?Array<{
+    id: string,
+    platform?: ?string,
+    absolutePaths: Array<string>,
+    type: 'duplicate' | 'shadowing',
+  }>,
+  hasteComputeConflicts(): Array<{
+    id: string,
+    platform?: ?string,
+    absolutePaths: Array<string>,
+    type: 'duplicate' | 'shadowing',
+  }>,
+  ...
+};
+
 export default class HastePlugin
   implements HasteMap, FileMapPlugin<null, string | null>
 {
@@ -62,6 +101,8 @@ export default class HastePlugin
   readonly #enableHastePackages: boolean;
   readonly #failValidationOnConflicts: boolean;
   #getModuleNameByPath: string => ?string;
+  #native: ?NativeHaste = null;
+  #onNativeWarnings: ?(warnings: ReadonlyArray<string>) => void;
   readonly #hasteImplModulePath: ?string;
   readonly #map: Map<string, HasteMapItem> = new Map();
   readonly #pathUtils: RootPathUtils;
@@ -80,9 +121,70 @@ export default class HastePlugin
     this.#failValidationOnConflicts = options.failValidationOnConflicts;
   }
 
+  /**
+   * Internal, for FileMap's Rust core: the options this plugin was built with.
+   */
+  _getRustOptions(): Readonly<{
+    enableHastePackages: boolean,
+    failValidationOnConflicts: boolean,
+    hasteImplModulePath: ?string,
+    platforms: ReadonlySet<string>,
+    rootDir: Path,
+  }> {
+    return {
+      enableHastePackages: this.#enableHastePackages,
+      failValidationOnConflicts: this.#failValidationOnConflicts,
+      hasteImplModulePath: this.#hasteImplModulePath,
+      platforms: this.#platforms,
+      rootDir: this.#rootDir,
+    };
+  }
+
+  /**
+   * Internal, for FileMap's Rust core. Binds this plugin to the native Haste
+   * map: `getModule`, `getPackage`, `getModuleNameByPath`, `assertValid` and
+   * `computeConflicts` are answered by it, and `onChanged` and `initialize`
+   * leave the work to the native file map, which updates it from its own
+   * change views. An unbound plugin is unchanged.
+   */
+  _bindToNative(
+    native: NativeHaste,
+    onWarnings?: (warnings: ReadonlyArray<string>) => void,
+  ): void {
+    this.#native = native;
+    this.#onNativeWarnings = onWarnings;
+  }
+
+  /** Internal: whether FileMap's Rust core has taken over this plugin. */
+  _isNative(): boolean {
+    return this.#native != null;
+  }
+
+  /**
+   * Internal, for FileMap's Rust core: logs what the native Haste map warned
+   * about, as `setModule` does through the plugin's console.
+   */
+  _warn(warnings: ReadonlyArray<string>): void {
+    this.#onNativeWarnings?.(warnings);
+    if (this.#console) {
+      for (const warning of warnings) {
+        this.#console.warn(warning);
+      }
+    }
+  }
+
   async initialize(
     opts: FileMapPluginInitOptions<null, string | null>,
   ): Promise<void> {
+    const native = this.#native;
+    if (native != null) {
+      this.#perfLogger?.point('constructHasteMap_start');
+      const {files, warnings} = native.hasteInitialize();
+      this._warn(warnings);
+      this.#perfLogger?.point('constructHasteMap_end');
+      this.#perfLogger?.annotate({int: {hasteFiles: files}});
+      return;
+    }
     this.#perfLogger?.point('constructHasteMap_start');
     const files = opts.files;
     let hasteFiles = 0;
@@ -134,6 +236,27 @@ export default class HastePlugin
     supportsNativePlatform?: ?boolean,
     type?: ?HTypeValue,
   ): ?Path {
+    const native = this.#native;
+    if (native != null) {
+      const result = native.hasteGetModule(
+        name,
+        platform ?? null,
+        !!supportsNativePlatform,
+        typeof type === 'number' ? type : null,
+      );
+      if (result.error != null) {
+        const {error} = result;
+        throw new DuplicateHasteCandidatesError(
+          error.hasteName,
+          error.platform ?? H.GENERIC_PLATFORM,
+          error.supportsNativePlatform,
+          new Map(
+            error.duplicatePaths.map((p, i) => [p, error.duplicateTypes[i]]),
+          ),
+        );
+      }
+      return result.path ?? null;
+    }
     const module = this.#getModuleMetadata(
       name,
       platform,
@@ -147,6 +270,9 @@ export default class HastePlugin
   }
 
   getModuleNameByPath(mixedPath: Path): ?string {
+    if (this.#native != null) {
+      return this.#native.hasteGetModuleNameByPath(mixedPath) ?? null;
+    }
     if (this.#getModuleNameByPath == null) {
       throw new Error(
         'HastePlugin has not been initialized before getModuleNameByPath',
@@ -237,6 +363,10 @@ export default class HastePlugin
   }
 
   onChanged(delta: ReadonlyFileSystemChanges<?string>): void {
+    if (this.#native != null) {
+      // The native file map has updated the native Haste map already.
+      return;
+    }
     // Process removals first so that moves aren't treated as duplicates.
     for (const [canonicalPath, maybeHasteId] of delta.removedFiles) {
       this.#onRemovedFile(canonicalPath, maybeHasteId);
@@ -350,6 +480,13 @@ export default class HastePlugin
     if (!this.#failValidationOnConflicts) {
       return;
     }
+    if (this.#native != null) {
+      const conflicts = this.#native.hasteAssertValid();
+      if (conflicts != null) {
+        throw new HasteConflictsError(toConflicts(conflicts));
+      }
+      return;
+    }
     const conflicts = this.computeConflicts();
     if (conflicts.length > 0) {
       throw new HasteConflictsError(conflicts);
@@ -409,6 +546,9 @@ export default class HastePlugin
   }
 
   computeConflicts(): Array<HasteConflict> {
+    if (this.#native != null) {
+      return toConflicts(this.#native.hasteComputeConflicts());
+    }
     const conflicts: Array<HasteConflict> = [];
 
     // Add literal duplicates tracked in the #duplicates map
@@ -510,4 +650,20 @@ export default class HastePlugin
       },
     };
   }
+}
+
+function toConflicts(
+  conflicts: ReadonlyArray<{
+    id: string,
+    platform?: ?string,
+    absolutePaths: Array<string>,
+    type: 'duplicate' | 'shadowing',
+  }>,
+): Array<HasteConflict> {
+  return conflicts.map(({absolutePaths, id, platform, type}) => ({
+    absolutePaths,
+    id,
+    platform: platform ?? null,
+    type,
+  }));
 }

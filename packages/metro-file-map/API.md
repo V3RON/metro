@@ -278,6 +278,7 @@ export type InputOptions = Readonly<{
   useWatchman?: null | undefined | boolean;
   watch?: null | undefined | boolean;
   watchmanDeferStates?: ReadonlyArray<string> | undefined;
+  unstable_rust?: null | undefined | Readonly<{[componentId: string]: boolean}>;
 }>;
 
 export class NoopCacheManager implements CacheManager {

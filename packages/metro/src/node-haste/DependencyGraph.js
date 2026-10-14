@@ -40,6 +40,7 @@ import {
 } from 'metro-core';
 import canonicalize from 'metro-core/private/canonicalize';
 import {DuplicateHasteCandidatesError} from 'metro-file-map';
+import RustFileSystem from 'metro-file-map/private/lib/RustFileSystem';
 import {InvalidPackageError} from 'metro-resolver';
 import {isRustEnabled, loadRustBinding} from 'metro-rust-switch';
 import EventEmitter from 'node:events';
@@ -67,8 +68,12 @@ export default class DependencyGraph extends EventEmitter {
   _haste: MetroFileMap;
   _fileSystem: FileSystem;
   #packageCache: PackageCache;
-  // The Rust replica of the file map, when the resolver runs in Rust.
+  // The Rust replica of the file map, when the resolver runs in Rust and the
+  // file map does not.
   #rustFileStore: ?RustFileStore = null;
+  // The file map when it runs in Rust. With the resolver in Rust it is the
+  // store itself: nothing is replicated and no change is forwarded.
+  #nativeFileSystem: ?RustFileSystem = null;
   _hasteMap: HasteMap;
   #dependencyPlugin: ?DependencyPlugin;
   _moduleResolver: ModuleResolver;
@@ -143,12 +148,16 @@ export default class DependencyGraph extends EventEmitter {
           this._getClosestPackage(absoluteModulePath),
       });
       if (isRustEnabled('resolver', config.unstable_rust)) {
-        this.#rustFileStore = new RustFileStore(
-          // The binding exports more than RustBinding's version().
-          loadRustBinding() as any,
-          config.projectRoot,
-          fileSystem,
-        );
+        if (fileSystem instanceof RustFileSystem) {
+          this.#nativeFileSystem = fileSystem;
+        } else {
+          this.#rustFileStore = new RustFileStore(
+            // The binding exports more than RustBinding's version().
+            loadRustBinding() as any,
+            config.projectRoot,
+            fileSystem,
+          );
+        }
       }
       this._createModuleResolver();
     });
@@ -203,7 +212,11 @@ export default class DependencyGraph extends EventEmitter {
       fileSystem: this._fileSystem,
       hasteMap: this._hasteMap,
       packageCache: this.#packageCache,
-      rustFileStore: this.#rustFileStore,
+      rustFileStore: this.#rustFileStore ?? this.#nativeFileSystem,
+      nativeHaste:
+        this.#nativeFileSystem != null &&
+        // $FlowFixMe[prop-missing] Only HastePlugin has it.
+        this._hasteMap._isNative?.() === true,
     });
   }
 

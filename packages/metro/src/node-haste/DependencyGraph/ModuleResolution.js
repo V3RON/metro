@@ -29,6 +29,7 @@ import {codeFrameColumns} from '@babel/code-frame';
 import invariant from 'invariant';
 import * as Resolver from 'metro-resolver';
 import createDefaultContext from 'metro-resolver/private/createDefaultContext';
+import {FILE_STORE, HASTE_PLATFORM} from 'metro-resolver/private/rust';
 import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
@@ -67,11 +68,58 @@ export class ModuleResolver {
   _projectRootFakeModulePath: string;
   // An empty module, the result of resolving `emptyModulePath` from the project root.
   _cachedEmptyModule: ?BundlerResolution;
+  // The Haste callbacks of a resolve, one pair per platform. They are stable
+  // so that the Rust resolver can recognise them (see `_getHasteResolvers`).
+  _hasteResolvers: Map<
+    ?string,
+    {
+      resolveHasteModule: (name: string) => ?string,
+      resolveHastePackage: (name: string) => ?string,
+    },
+  > = new Map();
 
   constructor(options: Options) {
     this._options = options;
     const {projectRoot} = this._options;
     this._projectRootFakeModulePath = path.join(projectRoot, '_');
+  }
+
+  /**
+   * `resolveHasteModule` and `resolveHastePackage` for a platform, created
+   * once per platform. When `getHasteModulePath` and `getHastePackagePath`
+   * carry a file store tag (the Rust file map answers Haste natively), the
+   * callbacks carry it too, with their platform.
+   */
+  _getHasteResolvers(platform: ?string): {
+    resolveHasteModule: (name: string) => ?string,
+    resolveHastePackage: (name: string) => ?string,
+  } {
+    let resolvers = this._hasteResolvers.get(platform);
+    if (resolvers == null) {
+      const {getHasteModulePath, getHastePackagePath} = this._options;
+      const resolveHasteModule = (name: string) =>
+        this._options.getHasteModulePath(name, platform);
+      const resolveHastePackage = (name: string) =>
+        this._options.getHastePackagePath(name, platform);
+      for (const [callback, source] of [
+        [resolveHasteModule, getHasteModulePath],
+        [resolveHastePackage, getHastePackagePath],
+      ]) {
+        // $FlowFixMe[invalid-computed-prop]
+        const store = source[FILE_STORE];
+        if (store != null) {
+          // $FlowFixMe[invalid-computed-prop]
+          // $FlowFixMe[prop-missing]
+          callback[FILE_STORE] = store;
+          // $FlowFixMe[invalid-computed-prop]
+          // $FlowFixMe[prop-missing]
+          callback[HASTE_PLATFORM] = platform ?? null;
+        }
+      }
+      resolvers = {resolveHasteModule, resolveHastePackage};
+      this._hasteResolvers.set(platform, resolvers);
+    }
+    return resolvers;
   }
 
   _getEmptyModule(): BundlerResolution {
@@ -126,6 +174,8 @@ export class ModuleResolver {
     } = this._options;
 
     try {
+      const {resolveHasteModule, resolveHastePackage} =
+        this._getHasteResolvers(platform);
       const result = Resolver.resolve(
         createDefaultContext(
           {
@@ -145,10 +195,8 @@ export class ModuleResolver {
             originModulePath,
             preferNativePlatform,
             resolveAsset,
-            resolveHasteModule: (name: string) =>
-              this._options.getHasteModulePath(name, platform),
-            resolveHastePackage: (name: string) =>
-              this._options.getHastePackagePath(name, platform),
+            resolveHasteModule,
+            resolveHastePackage,
             resolveRequest,
             schemeResolvers,
             sourceExts,
