@@ -77,21 +77,19 @@ pub struct ResolverConfig {
 impl ResolverConfig {
     #[napi(constructor)]
     pub fn new(options: ResolverConfigOptions) -> Self {
-        ResolverConfig {
-            config: Config {
-                asset_exts: options.asset_exts.into_iter().collect(),
-                disable_hierarchical_lookup: options.disable_hierarchical_lookup,
-                extra_node_modules: options.extra_node_modules,
-                main_fields: options.main_fields,
-                node_modules_paths: options.node_modules_paths,
-                prefer_native_platform: options.prefer_native_platform,
-                source_exts: options.source_exts,
-                unstable_condition_names: options.unstable_condition_names,
-                unstable_conditions_by_platform: options.unstable_conditions_by_platform,
-                unstable_enable_package_exports: options.unstable_enable_package_exports,
-                unstable_incremental_resolution: options.unstable_incremental_resolution,
-            },
-        }
+        let mut config = Config::new();
+        config.asset_exts = options.asset_exts.into_iter().collect();
+        config.disable_hierarchical_lookup = options.disable_hierarchical_lookup;
+        config.extra_node_modules = options.extra_node_modules;
+        config.main_fields = options.main_fields;
+        config.node_modules_paths = options.node_modules_paths;
+        config.prefer_native_platform = options.prefer_native_platform;
+        config.source_exts = options.source_exts;
+        config.unstable_condition_names = options.unstable_condition_names;
+        config.unstable_conditions_by_platform = options.unstable_conditions_by_platform;
+        config.unstable_enable_package_exports = options.unstable_enable_package_exports;
+        config.unstable_incremental_resolution = options.unstable_incremental_resolution;
+        ResolverConfig { config }
     }
 }
 

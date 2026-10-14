@@ -3,11 +3,12 @@
 
 use crate::config::Ctx;
 use crate::error::ResolveError;
+use crate::host::PackageJson;
 use crate::path;
 use crate::resolve_asset::resolve_asset;
 use crate::utils::{
-    is_asset_file, is_subpath_defined_in_exports_like, match_subpath_from_exports_like,
-    system_to_posix_path, NormalizedExportsLikeMap,
+    is_asset_file, match_subpath_in_flattened, match_subpath_pattern, reduce_exports_like_map,
+    request_condition_names, system_to_posix_path, NormalizedExportsLikeMap,
 };
 use crate::{Lookup, Resolution};
 use serde_json::{Map, Value};
@@ -32,32 +33,65 @@ pub fn resolve_package_target_from_exports(
     // to a package-relative subpath for comparison.
     module_path: &str,
     package_relative_path: &str,
+    // The package.json that `exports_field` belongs to (kept alive by the
+    // exports cache).
+    package_json: &PackageJson,
     exports_field: &Value,
     platform: Option<&str>,
 ) -> Result<Resolution, ResolveError> {
     let create_config_error =
         |reason: String| ResolveError::invalid_package_configuration(reason, package_path);
+    let not_exported = |subpath: &str| ResolveError::PackagePathNotExportedError {
+        message: format!(
+            "Attempted to import the module \"{module_path}\" which is not listed \
+             in the \"exports\" of \"{package_path}\" under the requested subpath \
+             \"{subpath}\"."
+        ),
+    };
 
     let subpath = get_exports_subpath(package_relative_path);
-    let export_map = normalize_exports_field(exports_field, &create_config_error)?;
 
-    if !is_subpath_defined_in_exports_like(&export_map, &subpath) {
-        return Err(ResolveError::PackagePathNotExportedError {
-            message: format!(
-                "Attempted to import the module \"{module_path}\" which is not listed \
-                 in the \"exports\" of \"{package_path}\" under the requested subpath \
-                 \"{subpath}\"."
-            ),
-        });
-    }
+    // Normalising and reducing depend only on the field, the config and the
+    // request's conditions, so they are cached (see `ExportsCache`). An entry
+    // exists only where both succeeded, so a hit raises the same errors (none)
+    // as recomputing.
+    let cache_key = (
+        exports_field as *const Value as usize,
+        ctx.request.is_esm_import,
+        platform.map(Box::from),
+    );
+    let cached = ctx.config.exports_cache.borrow().get(&cache_key);
+    let entry = match cached {
+        Some(entry) => {
+            if !is_subpath_defined_in_keys(entry.keys.iter().map(AsRef::as_ref), &subpath) {
+                return Err(not_exported(&subpath));
+            }
+            entry
+        }
+        None => {
+            let export_map = normalize_exports_field(exports_field, &create_config_error)?;
+            if !is_subpath_defined_in_keys(export_map.iter().map(|(k, _)| *k), &subpath) {
+                return Err(not_exported(&subpath));
+            }
+            // `matchSubpathFromExportsLike` reduces by the request's
+            // conditions before matching.
+            let condition_names = request_condition_names(ctx, platform);
+            let reduced =
+                reduce_exports_like_map(&export_map, &condition_names, &create_config_error)?;
+            ctx.config.exports_cache.borrow_mut().insert(
+                cache_key,
+                package_json.clone(),
+                export_map.iter().map(|(k, _)| Box::from(*k)).collect(),
+                reduced
+                    .iter()
+                    .map(|(k, v)| (Box::from(*k), v.map(Box::from)))
+                    .collect(),
+            )
+        }
+    };
 
-    let (target, pattern_match) = match_subpath_from_exports_like(
-        ctx,
-        &subpath,
-        &export_map,
-        platform,
-        &create_config_error,
-    )?;
+    let (index, pattern_match) = match_subpath_in_flattened(&subpath, &entry.reduced);
+    let target: Option<&str> = index.and_then(|i| entry.reduced[i].1.as_deref());
 
     if let Some(target) = target {
         // `target.slice(2)`: reduceExportsLikeMap guarantees a "./" prefix.
@@ -105,6 +139,20 @@ pub fn resolve_package_target_from_exports(
             platform.unwrap_or("null")
         ),
     })
+}
+
+/// `isSubpathDefinedInExportsLike` on the keys of a normalised map.
+fn is_subpath_defined_in_keys<'k>(
+    keys: impl Iterator<Item = &'k str> + Clone,
+    subpath: &str,
+) -> bool {
+    if keys.clone().any(|k| k == subpath) {
+        return true;
+    }
+
+    // Attempt to match after expanding any subpath pattern keys
+    keys.into_iter()
+        .any(|key| key.split('*').count() == 2 && match_subpath_pattern(key, subpath).is_some())
 }
 
 /// Convert a module path to the package-relative subpath key to attempt for

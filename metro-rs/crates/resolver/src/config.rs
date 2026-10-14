@@ -2,9 +2,11 @@
 //! for every resolve), the host that answers lookups (passed per call, since it
 //! may wrap per-call JS callbacks), and a small per-call request.
 
-use crate::host::ResolverHost;
+use crate::host::{PackageJson, ResolverHost};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 /// The long-lived, plain-data part of `ResolutionContext`. Resolving never
 /// clones it.
@@ -22,6 +24,59 @@ pub struct ResolverConfig {
     pub unstable_conditions_by_platform: HashMap<String, Vec<String>>,
     pub unstable_enable_package_exports: bool,
     pub unstable_incremental_resolution: bool,
+    /// See [`ExportsCache`].
+    pub(crate) exports_cache: RefCell<ExportsCache>,
+}
+
+/// The "exports" field of a package after normalisation and reduction by the
+/// condition names of a request, cached per package.json value, `isESMImport`
+/// and platform (the inputs of the reduction besides this config). The JS
+/// caches the normalised field per object in a WeakMap; this also keeps the
+/// reduced map. Entries hold their package.json, so the key (the address of
+/// its "exports" value) cannot be reused while the entry exists; a package.json
+/// replaced after a change is a different value and gets a new entry.
+/// The address of the "exports" value, `isESMImport` and the platform.
+pub(crate) type ExportsCacheKey = (usize, bool, Option<Box<str>>);
+
+#[derive(Default)]
+pub(crate) struct ExportsCache {
+    entries: std::collections::HashMap<ExportsCacheKey, Rc<ExportsEntry>>,
+}
+
+pub(crate) struct ExportsEntry {
+    _package_json: PackageJson,
+    /// The normalised map's keys, in order.
+    pub keys: Vec<Box<str>>,
+    /// The reduced map: subpath and target, in order.
+    pub reduced: Vec<(Box<str>, Option<Box<str>>)>,
+}
+
+/// Replaced packages stay cached until this many entries, then all go.
+const EXPORTS_CACHE_LIMIT: usize = 4096;
+
+impl ExportsCache {
+    pub fn get(&self, key: &ExportsCacheKey) -> Option<Rc<ExportsEntry>> {
+        self.entries.get(key).cloned()
+    }
+
+    pub fn insert(
+        &mut self,
+        key: ExportsCacheKey,
+        package_json: PackageJson,
+        keys: Vec<Box<str>>,
+        reduced: Vec<(Box<str>, Option<Box<str>>)>,
+    ) -> Rc<ExportsEntry> {
+        if self.entries.len() >= EXPORTS_CACHE_LIMIT {
+            self.entries.clear();
+        }
+        let entry = Rc::new(ExportsEntry {
+            _package_json: package_json,
+            keys,
+            reduced,
+        });
+        self.entries.insert(key, entry.clone());
+        entry
+    }
 }
 
 impl ResolverConfig {
@@ -46,6 +101,7 @@ impl ResolverConfig {
             )]),
             unstable_enable_package_exports: false,
             unstable_incremental_resolution: false,
+            exports_cache: RefCell::new(ExportsCache::default()),
         }
     }
 }

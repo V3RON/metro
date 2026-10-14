@@ -106,6 +106,22 @@ pub fn match_subpath_from_exports_like<'a>(
     platform: Option<&str>,
     create_config_error: &dyn Fn(String) -> ResolveError,
 ) -> Result<(Option<&'a str>, Option<String>), ResolveError> {
+    let condition_names = request_condition_names(ctx, platform);
+
+    let exports_like_map_after_conditions =
+        reduce_exports_like_map(exports_like_map, &condition_names, create_config_error)?;
+
+    let (index, pattern_match) =
+        match_subpath_in_flattened(subpath, &exports_like_map_after_conditions);
+    Ok((
+        index.and_then(|i| exports_like_map_after_conditions[i].1),
+        pattern_match,
+    ))
+}
+
+/// The condition names asserted for a request (the JS `conditionNames` set
+/// built in `matchSubpathFromExportsLike`).
+pub fn request_condition_names<'a>(ctx: &'a Ctx<'_>, platform: Option<&str>) -> ConditionNames<'a> {
     let mut condition_names = ConditionNames::default();
     condition_names.insert("default");
     condition_names.insert(if ctx.request.is_esm_import {
@@ -123,22 +139,28 @@ pub fn match_subpath_from_exports_like<'a>(
             }
         }
     }
+    condition_names
+}
 
-    let exports_like_map_after_conditions =
-        reduce_exports_like_map(exports_like_map, &condition_names, create_config_error)?;
-
-    let mut target: Option<&str> = None;
+/// The second half of `matchSubpathFromExportsLike`: find `subpath` in a map
+/// already reduced by conditions. Returns `(index, pattern_match)`, where the
+/// target is the value of entry `index` (none when no key matched).
+pub fn match_subpath_in_flattened<K: AsRef<str>, V>(
+    subpath: &str,
+    exports_like_map_after_conditions: &[(K, Option<V>)],
+) -> (Option<usize>, Option<String>) {
+    let mut target: Option<usize> = None;
     let mut pattern_match: Option<String> = None;
 
     // Attempt to match subpath pattern keys only if there is no exact key. An
     // exact key takes precedence even when its target is null. See step 2 of
     // `PACKAGE_IMPORTS_EXPORTS_RESOLVE` in:
     // https://nodejs.org/api/esm.html#resolution-algorithm-specification
-    if let Some((_, value)) = exports_like_map_after_conditions
+    if let Some(index) = exports_like_map_after_conditions
         .iter()
-        .find(|(k, _)| *k == subpath)
+        .position(|(k, _)| k.as_ref() == subpath)
     {
-        target = *value;
+        target = Some(index);
     } else {
         // Gather keys which are subpath patterns in descending order of
         // specificity. For ordering, see `PATTERN_KEY_COMPARE` in:
@@ -146,8 +168,9 @@ pub fn match_subpath_from_exports_like<'a>(
         let mut expansion_keys: Vec<(&str, usize)> = exports_like_map_after_conditions
             .iter()
             .filter_map(|(key, _)| {
+                let key = key.as_ref();
                 key.find('*')
-                    .map(|byte_idx| (*key, js_len(&key[..byte_idx])))
+                    .map(|byte_idx| (key, js_len(&key[..byte_idx])))
             })
             .collect();
         // `sort_by` is stable, like `Array.prototype.sort`.
@@ -163,8 +186,7 @@ pub fn match_subpath_from_exports_like<'a>(
         for (key, _) in expansion_keys {
             let value = exports_like_map_after_conditions
                 .iter()
-                .find(|(k, _)| *k == key)
-                .and_then(|(_, v)| *v);
+                .position(|(k, _)| k.as_ref() == key);
 
             pattern_match = match_subpath_pattern(key, subpath);
 
@@ -175,7 +197,7 @@ pub fn match_subpath_from_exports_like<'a>(
         }
     }
 
-    Ok((target, pattern_match))
+    (target, pattern_match)
 }
 
 /// The JS `Set` of condition names. A handful of names, so a list is the

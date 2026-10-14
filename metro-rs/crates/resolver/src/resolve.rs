@@ -272,6 +272,7 @@ pub fn resolve_default(
                         } else {
                             &parsed_specifier.posix_subpath[2..]
                         },
+                        &closest.package_json,
                         exports_field,
                         platform,
                     ) {
@@ -626,6 +627,7 @@ fn resolve_package(
                 &pkg.root_path,
                 absolute_candidate_path,
                 &pkg.package_relative_path,
+                &pkg.package_json,
                 exports_field,
                 platform,
             ) {
