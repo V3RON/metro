@@ -97,6 +97,21 @@ metro-cache's `FileStore` stores transform results. Those stay in the JS heap un
 
 Phase 2's micro:resolver timed a rebuild of the resolver's replica, because that replica only existed on the Rust side. In phase 3 the resolver's store is the file map itself, which both sides build before timing. The benchmark now rebuilds the store only when it is a phase 2 replica, i.e. one with a `rebuild()` method. The package caches still start equally warm on both sides, as Szymon decided in phase 2.
 
+## cold-filemap target moved (Szymon's decision, 2026-10-14)
+
+With Metro's default `unstable_lazySha1`, neither side hashes files during the file map build. In cold-filemap the file map is about 7–11% of the scenario:
+
+| | JS | Rust |
+|---|---:|---:|
+| FileMap build | 232 ms | 147 ms |
+| Whole build | 2149 ms | 1951 ms |
+
+The rest is the graph build and serialisation. Szymon therefore moved the target, in `port/phases.json` on main (98d4625 and ed34aab):
+
+- Phase 3's targets are micro:file-map 3× and warm-build 1.3×.
+- cold-filemap is informational in phases 3 and 4.
+- cold-filemap 2× is a phase 5 target.
+
 ## Departures from js-rust-boundary.md
 
 - **Watchers stay in JS** (the brief's default). They feed batches into Rust; the boundary note had Rust batching watcher events with a `ThreadsafeFunction`.
