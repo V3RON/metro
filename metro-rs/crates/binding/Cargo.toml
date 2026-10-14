@@ -18,7 +18,7 @@ metro-rs-file-store = { path = "../file-store" }
 metro-rs-file-map = { path = "../file-map" }
 metro-rs-haste = { path = "../haste" }
 metro-rs-resolver = { path = "../resolver" }
-napi = { version = "2", default-features = false, features = ["napi4"] }
+napi = { version = "2", default-features = false, features = ["napi3"] }
 napi-derive = "2"
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
