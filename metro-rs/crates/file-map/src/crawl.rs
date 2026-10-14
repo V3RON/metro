@@ -269,12 +269,43 @@ fn lstat(file: &str) -> Option<(f64, f64)> {
 }
 
 /// `stat.mtime.getTime()`: Node computes `mtimeMs = sec * 1000 + nsec / 1e6`
-/// and the `Date` truncates it to a whole millisecond (`TimeClip`).
+/// and builds the `Date` with `dateFromMs`, `new Date(MathRound(ms))`.
 pub fn mtime_ms(stat: &fs::Metadata) -> f64 {
     mtime_ms_from_parts(stat.mtime(), stat.mtime_nsec())
 }
 
 /// [`mtime_ms`] from the seconds and nanoseconds of the stat.
 pub fn mtime_ms_from_parts(sec: i64, nsec: i64) -> f64 {
-    ((sec as f64) * 1000.0 + (nsec as f64) / 1_000_000.0).trunc()
+    let ms = (sec as f64) * 1000.0 + (nsec as f64) / 1_000_000.0;
+    // `Math.round`: halves go up.
+    let floor = ms.floor();
+    if ms - floor >= 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    }
+}
+
+#[cfg(test)]
+mod collect_tests {
+    use super::*;
+
+    #[test]
+    fn mid_stream_error_discards_earlier_entries() {
+        let items = vec![
+            Ok(1),
+            Ok(2),
+            Err(std::io::Error::from_raw_os_error(5)),
+            Ok(3),
+        ];
+        let err = collect_entries(items.into_iter()).unwrap_err();
+        assert_eq!(
+            readdir_warning(&err, "/d"),
+            "Error \"EIO\" reading contents of \"/d\", skipping. Add this directory to your ignore list to exclude it."
+        );
+        assert_eq!(
+            collect_entries(vec![Ok(1), Ok(2)].into_iter()).unwrap(),
+            vec![1, 2]
+        );
+    }
 }

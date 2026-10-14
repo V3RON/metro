@@ -363,11 +363,11 @@ function emitMtimes() {
     [-1, 500000000], [-1, 0], [-1700000000, 123456789], [-1700000000, 999999999], [0, 1], [0, 999999],
     [0, 1000000], [4102444800, 999999999], [1700000000, 1], [86400, 700000], [-86400, 700000],
   ];
-  emit('/// (sec, nsec, mtime.getTime()) for a Date built the way Node builds stat.mtime');
+  emit('/// (sec, nsec, mtime.getTime()): Node builds stat.mtime with new Date(Math.round(mtimeMs)) (dateFromMs)');
   emit('pub const MTIMES: &[(i64, i64, i64)] = &[');
   for (const [sec, nsec] of pairs) {
     const ms = sec * 1000 + nsec / 1e6;
-    emit(`    (${sec}, ${nsec}, ${new Date(ms).getTime()}),`);
+    emit(`    (${sec}, ${nsec}, ${new Date(Math.round(ms)).getTime()}),`);
   }
   emit('];');
 }

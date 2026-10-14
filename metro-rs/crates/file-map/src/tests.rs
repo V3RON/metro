@@ -219,7 +219,7 @@ fn extname_matches_node() {
 }
 
 #[test]
-fn mtime_is_truncated_like_a_date() {
+fn mtime_is_rounded_like_a_stat_date() {
     for (sec, nsec, expected) in o::MTIMES {
         assert_eq!(
             mtime_ms_from_parts(*sec, *nsec),
