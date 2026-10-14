@@ -934,6 +934,8 @@ impl NativeFileMap {
         state.invalidate_packages(&changes);
         let size = changes.size() as u32;
         state.last_changes = changes;
+        // The first build is the one-off phase that grows the process.
+        metro_rs_core::release_memory_after_first_build();
         Ok(DeltaApplied {
             size,
             warnings: state.take_warnings(),

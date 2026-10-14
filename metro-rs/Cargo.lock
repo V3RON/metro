@@ -223,6 +223,9 @@ dependencies = [
 [[package]]
 name = "metro-rs-core"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "metro-rs-file-map"
