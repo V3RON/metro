@@ -1,0 +1,92 @@
+{
+ "resolutions": 7445,
+ "kinds": {
+  "relative": 6299,
+  "absolute": 1,
+  "bare": 1145,
+  "other": 0
+ },
+ "msPerPass": 100.78274998664855,
+ "usPerResolve": 13.536971119764749,
+ "counts": {
+  "getPackageForModule": 83922,
+  "resolveHastePackage": 1145,
+  "fileSystemLookup": 86706,
+  "resolveHasteModule": 243,
+  "doesFileExist": 66,
+  "getPackage": 66,
+  "resolveAsset": 5
+ },
+ "perResolve": {
+  "getPackageForModule": 11.27,
+  "resolveHastePackage": 0.15,
+  "fileSystemLookup": 11.65,
+  "resolveHasteModule": 0.03,
+  "doesFileExist": 0.01,
+  "getPackage": 0.01,
+  "resolveAsset": 0
+ },
+ "callbackMsPerPass": {
+  "getPackageForModule": 4.824608421325683,
+  "resolveHastePackage": 0.05043339729309082,
+  "fileSystemLookup": 34.23780841827393,
+  "resolveHasteModule": 0.010283207893371582,
+  "doesFileExist": 0.023616600036621093,
+  "getPackage": 0.0017750024795532226,
+  "resolveAsset": 0.01889181137084961
+ },
+ "callbackNsPerCall": {
+  "getPackageForModule": 57,
+  "resolveHastePackage": 44,
+  "fileSystemLookup": 395,
+  "resolveHasteModule": 42,
+  "doesFileExist": 358,
+  "getPackage": 27,
+  "resolveAsset": 3778
+ },
+ "distinctArgs": {
+  "getPackageForModule": 27902,
+  "resolveHastePackage": 37,
+  "fileSystemLookup": 28332,
+  "resolveHasteModule": 27,
+  "doesFileExist": 15,
+  "getPackage": 15,
+  "resolveAsset": 5
+ },
+ "distinctPackageJsonObjects": 42,
+ "nonCallbackFields": [
+  "dependency",
+  "allowHaste",
+  "assetExts",
+  "customResolverOptions",
+  "dev",
+  "disableHierarchicalLookup",
+  "extraNodeModules",
+  "isESMImport",
+  "mainFields",
+  "nodeModulesPaths",
+  "originModulePath",
+  "preferNativePlatform",
+  "resolveRequest",
+  "schemeResolvers",
+  "sourceExts",
+  "unstable_conditionNames",
+  "unstable_conditionsByPlatform",
+  "unstable_enablePackageExports",
+  "unstable_incrementalResolution"
+ ],
+ "enablePackageExports": true,
+ "mainFields": [
+  "react-native",
+  "browser",
+  "main"
+ ],
+ "sourceExts": [
+  "js",
+  "jsx",
+  "json",
+  "ts",
+  "tsx"
+ ],
+ "callbackShare": 0.3886321504807311
+}
