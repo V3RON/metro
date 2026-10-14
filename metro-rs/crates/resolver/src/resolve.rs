@@ -2,7 +2,7 @@
 
 use crate::config::{Ctx, ResolveRequest, ResolverConfig};
 use crate::error::{FileAndDirCandidates, FileCandidates, ResolveError};
-use crate::host::Lookup;
+use crate::host::{Lookup, ResolverHost};
 use crate::package_exports::resolve_package_target_from_exports;
 use crate::package_imports::resolve_package_target_from_imports;
 use crate::package_resolve::{
@@ -37,19 +37,17 @@ struct ParsedBareSpecifier {
 /// custom `resolveRequest`, it is used instead of the algorithm.
 pub fn resolve(
     config: &ResolverConfig,
+    host: &dyn ResolverHost,
     request: &ResolveRequest<'_>,
     specifier: &str,
     platform: Option<&str>,
 ) -> Result<Resolution, ResolveError> {
     // Prevent infinite recursion in the trivial case: a custom resolver that
     // is the default `resolve` is reported by the host as no custom resolver.
-    if let Some(result) = config
-        .host
-        .custom_resolve_request(config, request, specifier, platform)
-    {
+    if let Some(result) = host.custom_resolve_request(config, request, specifier, platform) {
         return result;
     }
-    resolve_default(config, request, specifier, platform)
+    resolve_default(config, host, request, specifier, platform)
 }
 
 /// The resolution algorithm without the custom `resolveRequest` hook. This is
@@ -57,11 +55,16 @@ pub fn resolve(
 /// resolver is invoked, so delegating hosts call this.
 pub fn resolve_default(
     config: &ResolverConfig,
+    host: &dyn ResolverHost,
     request: &ResolveRequest<'_>,
     specifier: &str,
     platform: Option<&str>,
 ) -> Result<Resolution, ResolveError> {
-    let ctx = &Ctx { config, request };
+    let ctx = &Ctx {
+        config,
+        host,
+        request,
+    };
     let context = ctx;
     let mut scheme_error: Option<ResolveError> = None;
 
@@ -125,7 +128,7 @@ pub fn resolve_default(
                 }
             }
         }
-    } else if specifier.find(':').is_some_and(|i| i > 0) && url_can_parse(specifier) {
+    } else if specifier.find(':').is_some_and(|i| i > 0) && host.can_parse_url(specifier) {
         let scheme_end = specifier.find(':').unwrap_or(0);
         let scheme = specifier[..scheme_end].to_lowercase();
         if let Some(result) = context
@@ -890,7 +893,7 @@ fn is_resolution_error(error: &ResolveError) -> bool {
 /// An approximation of `URL.canParse(input)` (WHATWG URL, no base): the
 /// scheme must be syntactically valid, and for authority-based URLs the host
 /// and port must be acceptable. It does not do IDNA or IPv4/IPv6 validation.
-fn url_can_parse(input: &str) -> bool {
+pub(crate) fn url_can_parse(input: &str) -> bool {
     // Strip leading/trailing C0 control or space, remove tab and newlines.
     let trimmed = input.trim_matches(|c: char| c <= ' ');
     let cleaned: String = trimmed

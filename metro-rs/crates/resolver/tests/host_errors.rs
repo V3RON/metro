@@ -42,7 +42,7 @@ impl ResolverHost for FailingHost {
 
 #[test]
 fn host_error_propagates_out_of_resolve() {
-    let config = ResolverConfig::new(Box::new(FailingHost));
+    let config = ResolverConfig::new();
     let options = serde_json::json!({});
     let request = ResolveRequest {
         origin_module_path: "/root/main.js",
@@ -52,7 +52,7 @@ fn host_error_propagates_out_of_resolve() {
         custom_resolver_options: &options,
     };
     for specifier in ["./a", "pkg"] {
-        let err = resolve(&config, &request, specifier, None).unwrap_err();
+        let err = resolve(&config, &FailingHost, &request, specifier, None).unwrap_err();
         assert_eq!(err, ResolveError::Host(boom()), "{specifier}");
         assert_eq!(err.class_name(), "Error");
         assert_eq!(err.message(), "lookup exploded");

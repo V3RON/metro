@@ -1,11 +1,13 @@
-//! `ResolutionContext` split in two: a long-lived config (built once, reused
-//! for every resolve) and a small per-call request.
+//! `ResolutionContext` split in three: a long-lived config (built once, reused
+//! for every resolve), the host that answers lookups (passed per call, since it
+//! may wrap per-call JS callbacks), and a small per-call request.
 
 use crate::host::ResolverHost;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// The long-lived part of `ResolutionContext`. Resolving never clones it.
+/// The long-lived, plain-data part of `ResolutionContext`. Resolving never
+/// clones it.
 pub struct ResolverConfig {
     pub asset_exts: HashSet<String>,
     pub disable_hierarchical_lookup: bool,
@@ -20,13 +22,12 @@ pub struct ResolverConfig {
     pub unstable_conditions_by_platform: HashMap<String, Vec<String>>,
     pub unstable_enable_package_exports: bool,
     pub unstable_incremental_resolution: bool,
-    pub host: Box<dyn ResolverHost>,
 }
 
 impl ResolverConfig {
     /// A config with the defaults of the JS test utility
     /// `createResolutionContext` (which closely match metro-config).
-    pub fn new(host: Box<dyn ResolverHost>) -> Self {
+    pub fn new() -> Self {
         ResolverConfig {
             asset_exts: ["jpg", "png"].iter().map(|s| s.to_string()).collect(),
             disable_hierarchical_lookup: false,
@@ -45,8 +46,13 @@ impl ResolverConfig {
             )]),
             unstable_enable_package_exports: false,
             unstable_incremental_resolution: false,
-            host,
         }
+    }
+}
+
+impl Default for ResolverConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -71,11 +77,12 @@ pub struct ResolveRequest<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct Ctx<'a> {
     pub config: &'a ResolverConfig,
+    pub host: &'a dyn ResolverHost,
     pub request: &'a ResolveRequest<'a>,
 }
 
 impl Ctx<'_> {
     pub fn host(&self) -> &dyn ResolverHost {
-        &*self.config.host
+        self.host
     }
 }

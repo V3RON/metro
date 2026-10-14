@@ -206,7 +206,7 @@ fn build_files(case: &Value) -> HashMap<String, Entry> {
 }
 
 /// Returns the config and the custom resolver options for the case.
-fn build_config(case: &Value) -> ResolverConfig {
+fn build_config(case: &Value) -> (ResolverConfig, MemoryHost) {
     let mut host = MemoryHost::new(build_files(case));
     if let Some(modules) = case["haste"]["modules"].as_object() {
         host.has_haste_override = true;
@@ -222,7 +222,7 @@ fn build_config(case: &Value) -> ResolverConfig {
         }
     }
 
-    let mut config = ResolverConfig::new(Box::new(host));
+    let mut config = ResolverConfig::new();
     let none = serde_json::Map::new();
     let overrides = case["context"].as_object().unwrap_or(&none);
     for (key, v) in overrides {
@@ -268,11 +268,11 @@ fn build_config(case: &Value) -> ResolverConfig {
     {
         config.unstable_condition_names = vec!["require".to_string()];
     }
-    config
+    (config, host)
 }
 
 fn run_case(case: &Value) -> Result<Resolution, String> {
-    let config = build_config(case);
+    let (config, host) = build_config(case);
     let overrides = &case["context"];
     let options = overrides
         .get("customResolverOptions")
@@ -287,6 +287,7 @@ fn run_case(case: &Value) -> Result<Resolution, String> {
     };
     resolve(
         &config,
+        &host,
         &request,
         case["request"].as_str().expect("request"),
         case["platform"].as_str(),

@@ -75,6 +75,13 @@ pub trait ResolverHost {
     /// `unstable_logWarning`.
     fn log_warning(&self, message: &str);
 
+    /// `URL.canParse(specifier)`, asked only for a specifier with a ':' after
+    /// its first character. The default is a Rust approximation (no IDNA or
+    /// IP address validation); a host backed by JS answers with the real one.
+    fn can_parse_url(&self, specifier: &str) -> bool {
+        crate::resolve::url_can_parse(specifier)
+    }
+
     /// `context.resolveRequest`, the user's custom resolver. Return `None`
     /// when there is none (or it is the default `resolve`); the algorithm then
     /// runs. When it returns `Some`, the algorithm does not run. A custom
