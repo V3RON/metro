@@ -20,3 +20,7 @@ website/translated_docs
 yarn-error.log
 port/.cache/
 port/.gate/
+
+# Rust build output (metro-rs)
+target/
+*.node
