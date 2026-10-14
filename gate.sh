@@ -2,16 +2,16 @@
 # Phase gate for the Metro to Rust port. See RULES.md.
 #
 #   ./gate.sh                 run every gate for the current phase
-#   ./gate.sh --quick         faster inner loop: one perf run, no cold-build target
+#   ./gate.sh --quick         faster inner loop: one perf run, cold builds only when caches are empty
 #   ./gate.sh --only compile  run one gate (compile, tests or perf)
 #   ./gate.sh --report        full run that also writes port/reports/phase-<n>.md
 #   ./gate.sh --phase 2       pick the phase instead of the first unapproved one
 #
 # Gates run in order and stop at the first failure:
-#   1. compile  cargo fmt, cargo clippy -D warnings, napi build, binding loads, flow, eslint
+#   1. compile  cargo fmt, cargo clippy -D warnings, napi build (fast profile), binding loads, flow, eslint
 #   2. tests    cargo test, full Jest suite with JS, Jest with the phase's components
 #               in Rust (minus port/js-only-tests.json), differential bundle check
-#   3. perf     pure-JS baseline against this checkout (port/bench/compare.js)
+#   3. perf     release napi build, then pure-JS baseline against this checkout (port/bench/compare.js)
 #
 # Exit codes: 0 all gates passed, 10 compile, 20 tests, 30 perf, 2 blocked or misuse.
 # Cargo paths in error messages are relative to metro-rs/.
@@ -99,7 +99,7 @@ if want compile; then
     step compile "cargo fmt" cargo fmt --manifest-path metro-rs/Cargo.toml --all --check || fail compile 10
     step compile "cargo clippy" cargo clippy --manifest-path metro-rs/Cargo.toml --workspace --all-targets --locked \
       -- -D warnings || fail compile 10
-    step compile "native binding build" yarn --cwd metro-rs build || fail compile 10
+    step compile "native binding build (fast profile)" yarn --cwd metro-rs build:fast || fail compile 10
     step compile "binding loads in Node" node -e "const b = require('./metro-rs'); if (typeof b.version !== 'function') throw new Error('metro-rs must export version()'); console.log('metro-rs', b.version())" || fail compile 10
   else
     FAILED_STEP="metro-rs/Cargo.toml is missing"
@@ -138,6 +138,10 @@ fi
 # ---------------------------------------------------------------- 3. perf
 if want perf; then
   say "3/3 performance"
+  if [ $HAS_RUST = 1 ]; then
+    # Benchmarks always measure the fully optimised release build.
+    step perf "native binding build (release)" yarn --cwd metro-rs build || fail perf 30
+  fi
   PERF_ARGS=(--phase "$PHASE")
   [ $QUICK = 1 ] && PERF_ARGS+=(--quick)
   [ $REPORT = 1 ] && PERF_ARGS+=(--runs 5)

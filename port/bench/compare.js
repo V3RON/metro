@@ -96,7 +96,12 @@ function main() {
   const targets = plan.perf.targets ?? {};
   const informational = new Set(plan.perf.informational ?? []);
   const micro = fs.readdirSync(path.join(__dirname, 'micro')).filter(f => f.endsWith('.js')).map(f => `micro:${f.slice(0, -3)}`);
-  const scenarios = ['cold-build', 'cold-filemap', 'warm-build', 'edit', ...micro];
+  // Quick runs skip cold builds once both sides' caches and the source map
+  // the micro-benchmark reads exist; they only warm the caches otherwise.
+  const warm =
+    sides.every(side => fs.existsSync(path.join(CACHE, 'bench', side.name, 'transform'))) &&
+    fs.existsSync(path.join(CACHE, 'bench', 'bench.map'));
+  const scenarios = [...(QUICK && warm ? [] : ['cold-build']), 'cold-filemap', 'warm-build', 'edit', ...micro];
   const missing = Object.keys(targets).filter(s => !scenarios.includes(s));
   const runsFor = s => (s === 'cold-build' ? (QUICK ? 1 : Math.max(1, RUNS - 1)) : RUNS);
 
@@ -140,6 +145,12 @@ function main() {
       status = 'fail';
       note = `peak memory up ${Math.round((cRss / bRss - 1) * 100)}%`;
     }
+    // A single quick run has no noise estimate, so a regression there is only
+    // a warning; full runs and --report enforce it. Missed targets still fail.
+    if (QUICK && status === 'fail' && targets[s] == null) {
+      status = 'warn';
+      note += '; single run, confirm with a full ./gate.sh';
+    }
     rows.push({
       scenario: s,
       baselineMs: Math.round(bMs),
@@ -178,7 +189,7 @@ function main() {
 }
 
 function toMarkdown(r) {
-  const icon = {ok: 'pass', fail: '**FAIL**', info: 'info'};
+  const icon = {ok: 'pass', fail: '**FAIL**', info: 'info', warn: 'warning'};
   const lines = [
     `### Performance, phase ${r.phase} (${r.title})${r.quick ? ' — quick run, not valid for a phase report' : ''}`,
     '',
