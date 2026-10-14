@@ -7,7 +7,7 @@ Written 2026-10-14 at about 20:40 UTC, when Szymon stopped work for the day. Rea
 - **Phases 0–3** are merged into `main` and approved by Szymon (`port/approvals/phase-0.md` … `phase-3.md`).
 - **Phase 4, "Incremental graph", is current** (`node port/lib/phase.js current` prints 4).
   - Branch: `port/phase-4` in `~/Projects/metro-rs` on Szymon's Mac. Head: `85eeb28e7`.
-  - The last two commits (`24dd55c3d`, `85eeb28e7`) are local only and not pushed; everything up to `0bf502879` is pushed. Push the branch before anything else.
+  - Everything, including the step 3 WIP and this handoff, is pushed to `origin/port/phase-4`.
 - **Scope**, widened by Szymon (see §2):
   - components `delta-core`, `incremental`, `transform-cache` and `worker-farm`;
   - target warm-build 1.6×; edit and cold-filemap are informational.
@@ -81,7 +81,7 @@ Known limit: an invalid `require.context` regexp that throws in the middle of a 
 
 ## 3. Next steps, in order
 
-1. **Push `port/phase-4`** (`24dd55c3d` and `85eeb28e7` are local).
+1. **Pull `port/phase-4`** and confirm the head is this handoff commit or later.
 2. **Finish step 3, batch resolution.**
    - It removes about 27k JS `resolveDependency` calls per bench-app build.
    - A native resolve costs about 32 µs per call (cloud), which is why the cache moves too.
