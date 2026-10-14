@@ -124,3 +124,52 @@ The rest is the graph build and serialisation. Szymon therefore moved the target
 
 - **warm-build 1.3×** depends on off-thread `getOrComputeSha1`. If it is still short after a genuine effort, I report with numbers.
 - **The watcher integration tests** flake on the Mac under load; the comparison against the baseline is described in the phase 2 notes. They run JS watchers in both modes.
+
+## Closing: accepted with open items (Szymon's decision, 2026-10-14)
+
+Szymon accepted phase 3 on 2026-10-14 as it stands at the head of `port/phase-3`.
+
+**State when accepted.** The last full cloud `./gate.sh --report` ran at f88b89f (medians of 5, Linux Xeon):
+
+| Scenario | Speed-up | Target |
+|---|---:|---|
+| micro:file-map | 6.05× | 3× |
+| warm-build | 1.40× | 1.3× |
+| micro:resolver | 1.46× | – |
+| micro:source-map | 2.23× | – |
+| cold-filemap | 1.35× | informational; moved to phase 5 |
+
+- **Compile and tests gates:** passed, including Jest with `file-map`, `node-haste` and `cache` in Rust plus `METRO_RUST_VERIFY`.
+- **Bundles:** byte-identical.
+- **The one failure:** the edit scenario's peak memory, +11% against a 10% limit. Two things came after that report:
+  - main's switch to resident memory after a forced GC (4d4092d), merged into this branch;
+  - the native-memory trim after the first build (992e869).
+
+  No full report has been run with both. Phase 4 starts by running one.
+
+### Potential improvements
+
+These are written down here so they are picked up later, not lost.
+
+1. **Edit-scenario memory.**
+   - The +11% peak was traced to V8 GC timing, not memory held by Rust:
+     - the per-run peaks are bimodal;
+     - the median over 6 extra runs is lower with Rust (790 MB against 853 MB);
+     - the live JS heap is smaller with Rust (230 MB against 260 MB);
+     - memory stayed flat across 120 edits on the Mac.
+   - Rust adds about 45 MB of native memory, mostly glibc thread arenas. 992e869 trims it after the first build.
+   - To revisit:
+     - confirm with the after-GC check;
+     - consider a smaller rayon pool;
+     - consider a single arena for the build threads.
+2. **File opens on the Mac.** On Szymon's Mac every file open from a non-Apple-signed binary costs about 100–150 µs and is serialised across threads and processes. It is most likely an endpoint-security scanner: Apple's `cat` scales to 0.55 s over 12 processes, while ours stays at about 3.5 s. That makes IO-bound Mac timings meaningless. If Metro users are affected the same way, then on macOS:
+   - a bulk-attribute crawl (`getattrlistbulk`);
+   - fewer opens: reuse the content read for hashing when the transformer needs it;
+   - investigate whether a signed binary avoids the cost.
+3. **cold-filemap 2×**, now a phase 5 target. With `unstable_lazySha1` the file map is about 10% of a cold-filemap start. The rest is the graph build (phase 4) and serialisation, including the source-map source re-reads, about 0.26 s of a 1.8 s warm build on the Mac.
+4. **Watchers and the Watchman crawl in Rust** (`notify`, `watchman_client`). They stay in JS this phase and feed batches into Rust. Port them if the edit or startup numbers show a gap.
+5. **The timer hop after each async task** (`settled()` in `metro-file-map/src/index.js`). It costs about 1 ms per build and exists so `server-torn-down-test` sees each napi task's async resource destroyed. A cleaner fix would avoid creating per-task async resources.
+6. **Custom cache managers, custom plugins and `crawlerFactory`** fall back to the whole JS file map. The boundary note's materialised snapshot would keep the Rust file map with a custom cache manager.
+7. **Rule 4 (`FileId`s crossing to JS)** is still not done. Paths cross as strings at the public edges. Phase 4's graph is the first consumer of ids.
+8. **Haste conflict ordering** uses an ASCII approximation of ICU `localeCompare`. Only the order of conflict messages for non-ASCII names can differ.
+9. **bincode 1.x** is flagged unmaintained by RustSec. It is only used for our own cache file. Move to bincode 2 or postcard when convenient.
