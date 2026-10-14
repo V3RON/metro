@@ -102,3 +102,20 @@ Never skip, delete, weaken or `.only` a test to get green. Never update a snapsh
 - **Check new Rust crates before adding them.** Prefer what the study already chose: napi-rs, oxc or swc for parsing, `sourcemap`, `notify`, Meta's `watchman_client`. Name every new crate in the PR.
 - **Leave alone what the port does not need.** Do not reformat, restructure or "clean up" JavaScript outside the component you are porting.
 - **When you are blocked, write it down.** Examples: a test that cannot pass without a behaviour change, a target that looks unreachable, or a decision only Szymon can make. Put it in the PR with what you tried and what you need, then stop.
+
+## 7. The JS/Rust boundary
+
+Approved by Szymon on 2026-10-14 for phases 2 to 5. The reasoning, the measurements and the phase-by-phase plan are in [port/design/js-rust-boundary.md](port/design/js-rust-boundary.md). A phase that needs to break one of these rules says so in its PR and waits for Szymon.
+
+1. **JavaScript calls Rust; Rust almost never calls JavaScript.** User hooks (`resolveRequest`, `schemeResolvers`, `customSerializer`, `getTransformOptions`, custom cache managers) are called from the JavaScript shell before or after it calls Rust, never from inside a Rust loop.
+2. **One crossing per unit of work, never per lookup.** That means one call per `resolve()` in phases 2 and 3, one per module's dependency list from phase 4, and one per watcher change batch.
+3. **Rust holds the file system state.** It is a read replica of the JavaScript file map in phase 2, and it becomes the file map itself in phase 3. The resolver, the Haste map, the package cache and the graph all share this one store.
+4. **Paths are interned once.** A `FileId` (u32) indexes Rust's table of normalised, root-relative paths. Ids are never reused within a process. JavaScript keeps an append-only `id → string` array, extended in batches.
+5. **Strings cross only at public API edges.** Inside Rust, and between Rust components, everything is ids.
+6. **Configuration crosses once.** It is registered once and gets a handle, and JavaScript caches handles by object identity. A per-call crossing carries the handle and a few scalars.
+7. **Native or JavaScript is decided per callback, by function identity.** Metro's own callbacks are tagged and served natively by Rust. Only a callback the caller replaced goes through JavaScript.
+8. **Rust is re-entrant around JavaScript calls.** Rust holds no lock or mutable borrow while calling JavaScript. Calls that return values are synchronous and on the main thread. `ThreadsafeFunction` is only for notifications such as watcher batches.
+9. **The public JavaScript objects stay real JavaScript objects.** This covers `Graph` and its `dependencies` map, change events and resolution results. Rust updates them from batched deltas, not through proxies.
+10. **Transform outputs stay in the JavaScript heap until phase 4 decides otherwise,** with measurements, at the start of that phase.
+
+Anything kept in JavaScript for speed goes on the list in the design note and is re-measured in phase 5.
