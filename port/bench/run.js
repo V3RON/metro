@@ -16,7 +16,12 @@
  *   bundle        writes a bundle and map to --out (used by port/diff/differential.js);
  *                 --dev false builds the production variant, unminified
  *
- * Prints one JSON line: {scenario, ms, mainCpuMs, peakRssMB, ...extra}.
+ * Prints one JSON line: {scenario, ms, mainCpuMs, peakRssMB, afterGcRssMB, ...extra}.
+ *
+ * afterGcRssMB is the resident memory after two forced full garbage
+ * collections at the end of the scenario (compare.js runs this script with
+ * --expose-gc). It is what the memory check uses: peak RSS mostly reflects
+ * when V8 happened to collect, and swings by a third between identical runs.
  */
 'use strict';
 
@@ -43,13 +48,21 @@ const usage = () => {
   const cpu = process.cpuUsage();
   return (cpu.user + cpu.system) / 1000;
 };
+const afterGcRssMB = () => {
+  if (typeof global.gc !== 'function') return undefined;
+  global.gc();
+  global.gc();
+  return Math.round(process.memoryUsage().rss / 2 ** 20);
+};
 const emit = (ms, extra = {}) => {
+  const peakRssMB = Math.round(process.resourceUsage().maxRSS / 1024);
   console.log(
     JSON.stringify({
       scenario: SCENARIO,
       ms: Math.round(ms * 10) / 10,
       mainCpuMs: Math.round(usage()),
-      peakRssMB: Math.round(process.resourceUsage().maxRSS / 1024),
+      peakRssMB,
+      afterGcRssMB: afterGcRssMB(),
       ...extra,
     }),
   );

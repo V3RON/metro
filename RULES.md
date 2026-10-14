@@ -14,7 +14,7 @@ The gates run in this order and stop at the first failure:
 |---|---|---|
 | 1. compile | `cargo fmt --check`, `cargo clippy -D warnings`, the napi-rs build with the fast `dev-fast` profile (`yarn --cwd metro-rs build:fast`), a check that the binding loads in Node, `flow check`, `eslint` | Any compiler, type or lint error. Fix what the compiler says; never silence a warning with `allow` without a comment explaining why. |
 | 2. tests | `cargo test`; the full Jest suite with `METRO_RUST=off`; the full Jest suite with the phase's components in Rust (minus the JS-only list); the differential bundle check | Any failing test, or any byte of difference between JS-built and Rust-built bundles or source maps. |
-| 3. perf | the release napi build (`yarn --cwd metro-rs build`, LTO), then `port/bench/compare.js`: pure-JS Metro at `baselineRef` against this checkout, same machine, interleaved runs | A scenario misses the phase's target, regresses beyond tolerance (5% or the measured noise, whichever is larger), or peak memory grows over 10%. |
+| 3. perf | the release napi build (`yarn --cwd metro-rs build`, LTO), then `port/bench/compare.js`: pure-JS Metro at `baselineRef` against this checkout, same machine, interleaved runs | A scenario misses the phase's target, regresses beyond tolerance (5% or the measured noise, whichever is larger), or memory after a forced full GC grows over 10% (peak RSS is reported but not checked; it depends on when V8 collects). |
 
 Usage:
 
