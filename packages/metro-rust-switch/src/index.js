@@ -41,6 +41,8 @@ export const COMPONENT_IDS: ReadonlyArray<string> = [
   'cache',
   'delta-core',
   'incremental',
+  'transform-cache',
+  'worker-farm',
   'serializers',
   'output',
   'assets',

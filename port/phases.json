@@ -44,11 +44,17 @@
     {
       "id": 4,
       "title": "Incremental graph",
-      "components": ["delta-core", "incremental"],
-      "exit": "Graph, incremental-rebuild and HMR suites pass on both sides; HMR deltas identical across a scripted edit session.",
+      "components": [
+        "delta-core",
+        "incremental",
+        "transform-cache",
+        "worker-farm"
+      ],
+      "exit": "Graph, incremental-rebuild and HMR suites pass on both sides; HMR deltas identical across a scripted edit session; transform-cache and worker-farm suites pass on both sides.",
+      "$comment": "Scope widened by Szymon on 2026-10-14 after the phase 4 profile (graph plus resolution is about 440 of 2190 ms of a warm build): Rust reads the transform cache (metro-cache FileStore entries) and the worker farm starts on the first cache miss. The edit target moved to phase 5, which owns most of an edit.",
       "perf": {
-        "targets": {"warm-build": 1.6, "edit": 1.2},
-        "informational": ["cold-filemap"]
+        "targets": {"warm-build": 1.6},
+        "informational": ["cold-filemap", "edit"]
       }
     },
     {
