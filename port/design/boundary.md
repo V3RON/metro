@@ -37,11 +37,32 @@ The switch sits inside metro-resolver's public `resolve()` (packages/metro-resol
 - **Built:** when `DependencyGraph` is ready, in one crossing (RustFileStore.js). It sends all normal paths joined with `\0`, a kind per path, and the symlink targets as the file map stores them.
 - **Kept current:** from every change batch in `DependencyGraph._onHasteChange`. That is the same place the JS package and resolution caches are invalidated, and the store invalidates its package cache there with the same rules.
 - **package.json:** read and parsed in Rust, with JS object key order (array-index keys first) and duplicate keys handled like `JSON.parse`. When Rust cannot be sure it matches `JSON.parse(readFileSync(p, 'utf8'))`, it defers to Metro's JS callback for that request, so JS errors and messages are kept. This covers unreadable files, invalid UTF-8, a BOM, lone surrogates and other parse errors.
+- **Package cache across rebuilds.** A rebuild of the tree, at startup or after a change batch with a symlink, keeps the package.json cache, as a reload of the JS file map keeps the JS `PackageCache`. Changed files are invalidated exactly as `_onHasteChange` invalidates the JS cache.
+- **Interned directories.** For a path inside the project root, `lookup` and `exists` resolve the directory once, through a table from directory path to `FileId`, and then look the basename up in it. These lookups are answered from that table instead of walking every segment from the root. Symlinks at the leaf, paths above the root and paths with empty, `.` or `..` segments take the full walk. Every change to the tree clears the table.
 - **METRO_RUST_VERIFY=resolver:** every native answer is compared with the JS callback's answer, including package.json key order. The resolve throws on the first difference. The gate turns this on in its Rust-mode Jest run.
+
+## Resolver-side caches
+
+- **"exports":** the normalised and condition-reduced map is cached per package.json value, `isESMImport` and platform, in the config handle. The JS caches only the normalised map, per object, in a WeakMap. Each entry holds its package.json, so a replaced package.json gets a new entry and an address is never reused. Only successful reductions are cached, so errors and messages are unchanged.
+- **`path.normalize`:** returns an already normal path as it is. A unit test checks this against the full algorithm.
+
+## micro:resolver and cache state (Szymon's decision, 2026-10-14)
+
+The benchmark times a rebuild of the Rust replica's tree, then 5 passes of `resolve()` over the 7,445 recorded resolutions. Both sides start with the package.json cache warm from the recording build.
+
+An earlier version of the benchmark also emptied the Rust package cache inside the timed region. It therefore measured a cold Rust cache against a warm JS one. Szymon chose equal cache states. Per-pass times on this machine (ms):
+
+| | Replica | Pass 1 | Passes 2–5 | Total |
+|---|---:|---:|---:|---:|
+| JS baseline | none | 82–88 | 76–86 | 395–421 |
+| Rust, package cache kept (now) | 12 | 46–52 | 46–49 | 245–263 |
+| Rust, package cache emptied (before) | 11 | 80 | about 48 | about 305 |
+
+A pass with a cold Rust package cache costs about 32 ms more than a warm pass. That is roughly 28,000 `hierarchicalLookup`s plus reading and parsing every package.json. A real cold start pays for this on both sides.
 
 ## Where phase 2 departs from the design
 
-- **FileId and the JS id→string array (rule 4).** The store uses `u32` node ids internally and never reuses them. Nothing crosses as an id yet: the only paths that cross are a resolve's inputs and its result, at the public API edge (rule 5). The JS id array starts when the graph moves to Rust (phase 4) and ids have a consumer.
+- **FileId and the JS id→string array (rule 4).** The store uses `u32` node ids internally and never reuses them, and it interns directory paths to ids for lookups. Nothing crosses as an id yet: the only paths that cross are a resolve's inputs and its result, at the public API edge (rule 5). The resolver algorithm itself still works on path strings. Threading ids through it would be a rewrite, and the profile did not need it. The JS id array starts when the graph moves to Rust (phase 4) and ids have a consumer.
 - **Symlink changes.** File map change events do not carry symlink targets. A change batch that adds or modifies a symlink therefore rebuilds the store from the JS file map, as at startup. Symlink changes are rare. Phase 3 removes this, because the file map itself moves to Rust.
 - **Haste lookups and `resolveAsset`** are still JS callbacks. The design allows this for phase 2. Metro creates its Haste callbacks per call, so they cannot be tagged.
 - **`unstable_logWarning`** is called through the trampoline at the point JS calls it, so ordering is unchanged. If the warning callback itself throws, the exception is ignored, where JS would propagate it.

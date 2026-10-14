@@ -16,8 +16,14 @@
  * When the resolver runs in Rust, Metro's callbacks are tagged with the Rust
  * replica of its file map (Symbol.for('metro.resolver.fileStore'), see
  * port/design/boundary.md). The timed region then starts by rebuilding that
- * replica from the JS file map, which also empties its package.json cache, so
- * the Rust side pays for the replica it needs. The JS side has no replica.
+ * replica's file tree from the JS file map, so the Rust side pays for the
+ * replica it needs; the JS side has no replica.
+ *
+ * Both sides start with the same package.json cache state: warm from the
+ * recording build. A rebuild keeps the Rust package cache, as a reload keeps
+ * the JS PackageCache. (Szymon's decision, 2026-10-14: an earlier version also
+ * emptied the Rust package cache in the timed region, which measured a cold
+ * Rust cache against a warm JS one.)
  */
 'use strict';
 
@@ -67,11 +73,29 @@ exports.run = async ({pkg, app, cache, now}) => {
     return failed;
   };
 
+  // The warm-up pass is the first resolve of every recorded request in this
+  // process after the recording build; reported, not timed.
+  let t = now();
   const failed = pass();
+  const warmUpMs = now() - t;
   const store = recorded[0]?.context.fileSystemLookup[Symbol.for('metro.resolver.fileStore')];
   const start = now();
   if (store != null) store.rebuild();
-  for (let i = 0; i < ITERATIONS; i++) pass();
+  const replicaMs = now() - start;
+  const passesMs = [];
+  for (let i = 0; i < ITERATIONS; i++) {
+    t = now();
+    pass();
+    passesMs.push(Math.round((now() - t) * 10) / 10);
+  }
   const ms = now() - start;
-  return {ms, extra: {resolutions: recorded.length, failed, iterations: ITERATIONS, replica: store != null}};
+  return {ms, extra: {
+      resolutions: recorded.length,
+      failed,
+      iterations: ITERATIONS,
+      replica: store != null,
+      replicaMs: Math.round(replicaMs * 10) / 10,
+      warmUpMs: Math.round(warmUpMs * 10) / 10,
+      passesMs,
+    },};
 };

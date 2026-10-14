@@ -174,6 +174,14 @@ impl FileStore {
         Some(Some((child, canonical)))
     }
 
+    /// Empties the tree (keeping the package cache), before a `bulk_add` of
+    /// the whole file map. Like the JS `PackageCache`, which a reload of the
+    /// file map does not reset, cached packages stay until invalidated.
+    pub fn clear_tree(&mut self) {
+        self.nodes = Nodes::new();
+        self.dirs.get_mut().clear();
+    }
+
     pub fn root_dir(&self) -> &str {
         &self.root_dir
     }

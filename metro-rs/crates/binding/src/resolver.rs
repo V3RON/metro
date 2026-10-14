@@ -123,14 +123,14 @@ impl FileStore {
         })
     }
 
-    /// Replaces the contents with the given entries: normal paths joined with
-    /// \0, a kind per path, and the symlink targets (one per symlink, in
-    /// order) joined with \0.
+    /// Replaces the tree with the given entries: normal paths joined with \0,
+    /// a kind per path, and the symlink targets (one per symlink, in order)
+    /// joined with \0. The package.json cache is kept, as the JS
+    /// `PackageCache` is; callers invalidate changed files.
     #[napi]
     pub fn rebuild(&self, paths: String, kinds: Uint8Array, symlink_targets: String) -> Result<()> {
         let mut store = self.borrow_mut()?;
-        let root_dir = store.root_dir().to_string();
-        *store = Store::new(&root_dir);
+        store.clear_tree();
         let mut targets = split_nul(&symlink_targets);
         let mut entries = Vec::with_capacity(kinds.len());
         for (path, kind) in split_nul(&paths).zip(kinds.iter()) {
@@ -145,6 +145,19 @@ impl FileStore {
         store
             .bulk_add(entries)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// `PackageCache.invalidate` for each absolute path, in order.
+    #[napi]
+    pub fn invalidate_packages(&self, absolute_paths: Vec<String>) -> Result<()> {
+        let store = self
+            .store
+            .try_borrow()
+            .map_err(|_| napi::Error::from_reason("metro-rs: the file store is being changed"))?;
+        for path in &absolute_paths {
+            store.invalidate_package(path);
+        }
+        Ok(())
     }
 
     /// Applies one change batch of the file map (see `apply_change_batch`).

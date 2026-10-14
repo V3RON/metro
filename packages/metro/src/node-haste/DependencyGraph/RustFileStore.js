@@ -12,6 +12,7 @@
 import type {ChangeEvent, FileSystem} from 'metro-file-map';
 
 import H from 'metro-file-map/private/constants';
+import path from 'node:path';
 
 /**
  * A Rust read replica of the file map (a `FileStore` from metro-rs), used by
@@ -25,6 +26,7 @@ import H from 'metro-file-map/private/constants';
 
 type NativeFileStore = {
   rebuild(paths: string, kinds: Uint8Array, symlinkTargets: string): void,
+  invalidatePackages(absolutePaths: Array<string>): void,
   applyChanges(
     removedFiles: Array<string>,
     removedDirectories: Array<string>,
@@ -66,6 +68,7 @@ export default class RustFileStore {
    * Loads every file and symlink of the JS file map, in one crossing: the
    * normal paths joined with \0, a kind per path, and the symlink targets
    * (normal POSIX paths, as the file map stores them) joined with \0.
+   * The store's package.json cache is kept, like the JS PackageCache.
    */
   rebuild(): void {
     // TreeFS, the only FileSystem implementation, has this.
@@ -98,7 +101,7 @@ export default class RustFileStore {
    * the JS file map. Change events do not carry symlink targets, so a batch
    * that adds or modifies a symlink reloads everything instead.
    */
-  applyChanges({changes}: ChangeEvent): void {
+  applyChanges({changes, rootDir}: ChangeEvent): void {
     const changedFiles: Array<string> = [];
     const changedKinds: Array<number> = [];
     for (const [canonicalPath, metadata] of [
@@ -107,6 +110,15 @@ export default class RustFileStore {
     ]) {
       if (metadata.isSymlink) {
         this.rebuild();
+        // The rebuild keeps the package.json cache, so invalidate as
+        // DependencyGraph._onHasteChange does for the JS one.
+        this.native.invalidatePackages(
+          [
+            ...changes.addedFiles,
+            ...changes.modifiedFiles,
+            ...changes.removedFiles,
+          ].map(([changedPath]) => path.join(rootDir, changedPath)),
+        );
         return;
       }
       changedFiles.push(canonicalPath);
