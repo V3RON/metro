@@ -46,14 +46,20 @@
       "title": "Incremental graph",
       "components": ["delta-core", "incremental"],
       "exit": "Graph, incremental-rebuild and HMR suites pass on both sides; HMR deltas identical across a scripted edit session.",
-      "perf": {"targets": {"warm-build": 1.6, "edit": 1.2}, "informational": ["cold-filemap"]}
+      "perf": {
+        "targets": {"warm-build": 1.6, "edit": 1.2},
+        "informational": ["cold-filemap"]
+      }
     },
     {
       "id": 5,
       "title": "Output and server",
       "components": ["serializers", "output", "assets", "hmr", "server", "lib"],
       "exit": "Server endpoint, CLI and output suites pass on both sides; byte-identical output on the differential apps; the JS fallback still works.",
-      "perf": {"targets": {"warm-build": 2.5, "edit": 1.5, "cold-filemap": 2.0}, "informational": []}
+      "perf": {
+        "targets": {"warm-build": 2.5, "edit": 1.5, "cold-filemap": 2.0},
+        "informational": []
+      }
     },
     {
       "id": 6,
