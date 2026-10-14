@@ -43,6 +43,7 @@
     "jest-watch-typeahead": "^2.2.0",
     "jsonc-eslint-parser": "^2.3.0",
     "metro-babel-register": "*",
+    "metro-rs": "link:./metro-rs",
     "prettier": "3.9.4",
     "progress": "^2.0.0",
     "signedsource": "^2.0.0",
