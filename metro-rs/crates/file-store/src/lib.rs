@@ -15,7 +15,9 @@ mod package_cache;
 mod root_path_utils;
 mod tree;
 
-pub use file_store::{ChangeBatch, EntryKind, FileStore, FileStoreError};
+pub use file_store::{
+    ChangeBatch, ChangeSink, EntryKind, FileStore, FileStoreError, NodeInfo, NodeLookup,
+};
 pub use invariant::Invariant;
 pub use json::{array_index, parse_like_js};
 pub use metro_rs_resolver::{Lookup, PackageForModule};

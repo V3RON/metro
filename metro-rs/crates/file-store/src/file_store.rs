@@ -9,7 +9,7 @@ use crate::root_path_utils::RootPathUtils;
 use crate::tree::FxHasher;
 use crate::tree::{
     lookup_by_normal_path, Ancestor, FileId, LookupOpts, LookupOut, Node, Nodes, ReadOnly,
-    ReadWrite,
+    ReadWrite, ReadWriteListen,
 };
 use metro_rs_resolver::path;
 use metro_rs_resolver::Lookup;
@@ -27,7 +27,67 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind<'a> {
     File,
-    Symlink { target: &'a str },
+    Symlink {
+        target: &'a str,
+    },
+    /// A symlink whose target is not known yet (`metadata[H.SYMLINK] === 1`).
+    /// Looking through it fails the JS invariant 'Expected symlink target to
+    /// be populated.'
+    UnresolvedSymlink,
+}
+
+/// What a node is, by id. See [`FileStore::node_info`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeInfo<'a> {
+    Dir,
+    File,
+    Symlink {
+        target: &'a str,
+    },
+    UnresolvedSymlink,
+    /// Removed from the tree (ids are never reused).
+    Removed,
+}
+
+/// The result of [`FileStore::lookup_node`] (`#lookupByNormalPath`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeLookup {
+    Found {
+        ancestor_of_root_idx: Option<usize>,
+        canonical_path: String,
+        node: FileId,
+        /// `None` only for the root.
+        parent_node: Option<FileId>,
+    },
+    Missing {
+        canonical_missing_path: String,
+        missing_segment_name: String,
+    },
+}
+
+/// The `FileSystemListener` of the JS: called by the `*_with` mutation methods.
+/// `M` is the caller's per-file payload (the file's metadata), supplied with
+/// each added or modified entry. The store never looks at it.
+pub trait ChangeSink<M> {
+    fn directory_added(&mut self, canonical_path: &str);
+    fn directory_removed(&mut self, canonical_path: &str);
+    /// A new file or symlink node `id`.
+    fn file_added(&mut self, normal_path: &str, id: FileId, new: M);
+    /// An existing file or symlink node `id` was overwritten (it keeps its id).
+    fn file_modified(&mut self, normal_path: &str, id: FileId, new: M);
+    /// Called before the node is deleted.
+    fn file_removed(&mut self, canonical_path: &str, id: FileId);
+}
+
+/// A sink for the methods without a listener.
+struct NoSink;
+
+impl ChangeSink<()> for NoSink {
+    fn directory_added(&mut self, _: &str) {}
+    fn directory_removed(&mut self, _: &str) {}
+    fn file_added(&mut self, _: &str, _: FileId, _: ()) {}
+    fn file_modified(&mut self, _: &str, _: FileId, _: ()) {}
+    fn file_removed(&mut self, _: &str, _: FileId) {}
 }
 
 /// The throws of `TreeFS.addOrModify` / `bulkAddOrModify` (and creating a
@@ -331,32 +391,111 @@ impl FileStore {
         })
     }
 
+    /// `#lookupByNormalPath(normalPath, {followLeaf})`, for callers that walk
+    /// the tree themselves (file-map's `matchFiles`, `getDifference`).
+    pub fn lookup_node(
+        &self,
+        normal_path: &str,
+        follow_leaf: bool,
+    ) -> Result<NodeLookup, Invariant> {
+        let opts = LookupOpts {
+            follow_leaf,
+            ..LookupOpts::default()
+        };
+        Ok(match self.lookup_ro(normal_path, opts)? {
+            LookupOut::Found {
+                ancestor_of_root_idx,
+                canonical_path,
+                node,
+                parent_node,
+            } => NodeLookup::Found {
+                ancestor_of_root_idx,
+                canonical_path: canonical_path.into_owned(),
+                node,
+                parent_node,
+            },
+            LookupOut::Missing {
+                canonical_missing_path,
+                missing_segment_name,
+            } => NodeLookup::Missing {
+                canonical_missing_path,
+                missing_segment_name,
+            },
+        })
+    }
+
+    /// What the node `id` is. The detached directory a lookup of a missing
+    /// '..' can return is a `Dir`.
+    pub fn node_info(&self, id: FileId) -> NodeInfo<'_> {
+        if id == FileId::PHANTOM {
+            return NodeInfo::Dir;
+        }
+        match self.nodes.get(id) {
+            Node::Dir(_) => NodeInfo::Dir,
+            Node::File => NodeInfo::File,
+            Node::Symlink(t) => NodeInfo::Symlink { target: t },
+            Node::UnresolvedSymlink => NodeInfo::UnresolvedSymlink,
+            Node::Removed => NodeInfo::Removed,
+        }
+    }
+
+    /// `directory.entries()` in JS `Map` insertion order. Empty for anything
+    /// but a directory.
+    pub fn ordered_children(&self, dir: FileId) -> Vec<(&str, FileId)> {
+        self.nodes.ordered_children(dir)
+    }
+
     // ---------------------------------------------------------------------
     // Mutation
     // ---------------------------------------------------------------------
 
     fn alloc_entry(&mut self, kind: EntryKind<'_>) -> FileId {
-        self.nodes.alloc(match kind {
+        self.nodes.alloc(Self::node_of(kind))
+    }
+
+    fn node_of(kind: EntryKind<'_>) -> Node {
+        match kind {
             EntryKind::File => Node::File,
             EntryKind::Symlink { target } => Node::Symlink(target.into()),
-        })
+            EntryKind::UnresolvedSymlink => Node::UnresolvedSymlink,
+        }
     }
 
     /// `directoryNode.set(basename, metadata)`. Overwrites whatever is there,
     /// like the JS does when there is no change listener. Modifying a file or
-    /// symlink keeps its id.
-    fn set_entry(&mut self, dir: FileId, basename: &str, kind: EntryKind<'_>) {
+    /// symlink keeps its id. Returns the id and whether the node is new.
+    fn set_entry(&mut self, dir: FileId, basename: &str, kind: EntryKind<'_>) -> (FileId, bool) {
         if let Some(existing) = self.nodes.child(dir, basename) {
             if !self.nodes.is_directory(existing) {
-                *self.nodes.get_mut(existing) = match kind {
-                    EntryKind::File => Node::File,
-                    EntryKind::Symlink { target } => Node::Symlink(target.into()),
-                };
-                return;
+                *self.nodes.get_mut(existing) = Self::node_of(kind);
+                return (existing, false);
             }
         }
         let id = self.alloc_entry(kind);
         self.nodes.set_child(dir, basename, id);
+        (id, true)
+    }
+
+    /// `#lookupByNormalPath` with `makeDirectories` and a `directoryAdded`
+    /// listener (if there is a sink).
+    fn lookup_rw_with<'a, M, S: ChangeSink<M>>(
+        &mut self,
+        normal_path: &'a str,
+        opts: LookupOpts<'_>,
+        sink: Option<&mut S>,
+    ) -> Result<LookupOut<'a>, Invariant> {
+        match sink {
+            None => self.lookup_rw(normal_path, opts),
+            Some(sink) => {
+                let mut on_dir = |p: &str| ChangeSink::<M>::directory_added(sink, p);
+                lookup_by_normal_path(
+                    &mut ReadWriteListen(&mut self.nodes, &mut on_dir),
+                    &self.path_utils,
+                    normal_path,
+                    opts,
+                )
+            }
+        }
     }
 
     /// `TreeFS.addOrModify(mixedPath, metadata)` without a listener.
@@ -365,19 +504,41 @@ impl FileStore {
         canonical_path: &str,
         kind: EntryKind<'_>,
     ) -> Result<(), FileStoreError> {
+        self.add_or_modify_inner::<(), NoSink>(canonical_path, kind, (), None)
+    }
+
+    /// `TreeFS.addOrModify(mixedPath, metadata, changeListener)`. `payload` is
+    /// handed to the sink with the added or modified file.
+    pub fn add_or_modify_with<M, S: ChangeSink<M>>(
+        &mut self,
+        mixed_path: &str,
+        kind: EntryKind<'_>,
+        payload: M,
+        sink: &mut S,
+    ) -> Result<(), FileStoreError> {
+        self.add_or_modify_inner(mixed_path, kind, payload, Some(sink))
+    }
+
+    fn add_or_modify_inner<M, S: ChangeSink<M>>(
+        &mut self,
+        mixed_path: &str,
+        kind: EntryKind<'_>,
+        payload: M,
+        mut sink: Option<&mut S>,
+    ) -> Result<(), FileStoreError> {
         // Any change can move or remove an interned directory.
         self.dirs.get_mut().clear();
-        let mixed_path = canonical_path;
         let normal_path = self.normalize_path(mixed_path);
         // Walk the tree to find the *real* path of the parent node, creating
         // directories as we need.
         let parent_dirname = path::dirname(&normal_path);
-        let parent_dir_node = self.lookup_rw(
+        let parent_dir_node = self.lookup_rw_with(
             &parent_dirname,
             LookupOpts {
                 make_directories: true,
                 ..Default::default()
             },
+            sink.as_deref_mut(),
         )?;
         let LookupOut::Found {
             canonical_path: parent_canonical,
@@ -391,7 +552,7 @@ impl FileStore {
         // Normalize the resulting path to account for the parent node being root.
         let joined = format!("{}/{}", parent_canonical, path::basename(&normal_path));
         let canonical = self.normalize_path(&joined).into_owned();
-        self.bulk_add([(&*canonical, kind)])
+        self.bulk_add_inner([(&*canonical, kind, payload)], sink)
     }
 
     /// `TreeFS.bulkAddOrModify` without a listener. Entries are canonical
@@ -399,6 +560,23 @@ impl FileStore {
     pub fn bulk_add<'a>(
         &mut self,
         entries: impl IntoIterator<Item = (&'a str, EntryKind<'a>)>,
+    ) -> Result<(), FileStoreError> {
+        self.bulk_add_inner::<(), NoSink>(entries.into_iter().map(|(p, k)| (p, k, ())), None)
+    }
+
+    /// `TreeFS.bulkAddOrModify(files, changeListener)`.
+    pub fn bulk_add_with<'a, M, S: ChangeSink<M>>(
+        &mut self,
+        entries: impl IntoIterator<Item = (&'a str, EntryKind<'a>, M)>,
+        sink: &mut S,
+    ) -> Result<(), FileStoreError> {
+        self.bulk_add_inner(entries, Some(sink))
+    }
+
+    fn bulk_add_inner<'a, M, S: ChangeSink<M>>(
+        &mut self,
+        entries: impl IntoIterator<Item = (&'a str, EntryKind<'a>, M)>,
+        mut sink: Option<&mut S>,
     ) -> Result<(), FileStoreError> {
         // Any change can move or remove an interned directory.
         self.dirs.get_mut().clear();
@@ -409,19 +587,20 @@ impl FileStore {
         let mut last_dir: Option<String> = None;
         let mut directory_node = FileId::ROOT;
 
-        for (normal_path, kind) in entries {
+        for (normal_path, kind, payload) in entries {
             let last_sep_idx = normal_path.rfind('/');
             let dirname = last_sep_idx.map_or("", |i| &normal_path[..i]);
             let basename = last_sep_idx.map_or(normal_path, |i| &normal_path[i + 1..]);
 
             if last_dir.as_deref() != Some(dirname) {
-                let lookup = self.lookup_rw(
+                let lookup = self.lookup_rw_with(
                     dirname,
                     LookupOpts {
                         follow_leaf: false,
                         make_directories: true,
                         ..Default::default()
                     },
+                    sink.as_deref_mut(),
                 )?;
                 match lookup {
                     LookupOut::Missing {
@@ -445,7 +624,27 @@ impl FileStore {
                     }
                 }
             }
-            self.set_entry(directory_node, basename, kind);
+            match sink.as_deref_mut() {
+                None => {
+                    self.set_entry(directory_node, basename, kind);
+                }
+                Some(sink) => {
+                    let existing = self.nodes.child(directory_node, basename);
+                    if let Some(existing) = existing {
+                        if self.nodes.is_directory(existing) {
+                            return Err(FileStoreError(format!(
+                                "Detected addition or modification of file {normal_path}, but it is tracked as a non-empty directory"
+                            )));
+                        }
+                    }
+                    let (id, is_new) = self.set_entry(directory_node, basename, kind);
+                    if is_new {
+                        sink.file_added(normal_path, id, payload);
+                    } else {
+                        sink.file_modified(normal_path, id, payload);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -480,13 +679,26 @@ impl FileStore {
     /// `TreeFS.remove(mixedPath)` without a listener. Also used for removed
     /// directories: removing a directory removes everything under it.
     pub fn remove(&mut self, canonical_path: &str) -> Result<(), FileStoreError> {
-        // Any change can move or remove an interned directory.
-        self.dirs.get_mut().clear();
-        let normal_path = self.normalize_path(canonical_path);
-        Ok(self.remove_normal_path(&normal_path)?)
+        self.remove_with::<(), NoSink>(canonical_path, None)
     }
 
-    fn remove_normal_path(&mut self, normal_path: &str) -> Result<(), Invariant> {
+    /// `TreeFS.remove(mixedPath, changeListener)`.
+    pub fn remove_with<M, S: ChangeSink<M>>(
+        &mut self,
+        mixed_path: &str,
+        sink: Option<&mut S>,
+    ) -> Result<(), FileStoreError> {
+        // Any change can move or remove an interned directory.
+        self.dirs.get_mut().clear();
+        let normal_path = self.normalize_path(mixed_path).into_owned();
+        Ok(self.remove_normal_path::<M, S>(&normal_path, sink)?)
+    }
+
+    fn remove_normal_path<M, S: ChangeSink<M>>(
+        &mut self,
+        normal_path: &str,
+        mut sink: Option<&mut S>,
+    ) -> Result<(), Invariant> {
         let result = self.lookup_ro(
             normal_path,
             LookupOpts {
@@ -503,15 +715,26 @@ impl FileStore {
         else {
             return Ok(());
         };
+        let canonical_path = canonical_path.into_owned();
 
         if self.nodes.is_directory(node) && self.nodes.dir_size(node) > 0 {
             for basename in self.nodes.child_names(node) {
-                self.remove_normal_path(&format!("{canonical_path}/{basename}"))?;
+                self.remove_normal_path::<M, S>(
+                    &format!("{canonical_path}/{basename}"),
+                    sink.as_deref_mut(),
+                )?;
             }
             // Removing the last file will delete this directory
             return Ok(());
         }
         if let Some(parent_node) = parent_node {
+            if let Some(sink) = sink.as_deref_mut() {
+                if self.nodes.is_directory(node) {
+                    sink.directory_removed(&canonical_path);
+                } else {
+                    sink.file_removed(&canonical_path, node);
+                }
+            }
             self.nodes
                 .delete_child(parent_node, &path::basename(&canonical_path));
             if self.nodes.dir_size(parent_node) == 0 && parent_node != FileId::ROOT {
@@ -520,7 +743,7 @@ impl FileStore {
                 // that's not expected to be a case common enough to justify
                 // implementation complexity, or slowing down more common uses of
                 // lookup_by_normal_path.
-                self.remove_normal_path(&path::dirname(&canonical_path))?;
+                self.remove_normal_path::<M, S>(&path::dirname(&canonical_path), sink)?;
             }
         }
         Ok(())
@@ -862,16 +1085,17 @@ impl FileStore {
             let Node::Dir(children) = nodes.get(dir) else {
                 return;
             };
-            for (name, id) in children {
+            for (name, id) in children.ordered() {
                 let p = if prefix.is_empty() {
                     name.to_string()
                 } else {
                     format!("{prefix}/{name}")
                 };
-                match nodes.get(*id) {
-                    Node::Dir(_) => walk(nodes, *id, &p, out),
+                match nodes.get(id) {
+                    Node::Dir(_) => walk(nodes, id, &p, out),
                     Node::File => out.push(format!("{p}|f")),
                     Node::Symlink(t) => out.push(format!("{p}|l:{t}")),
+                    Node::UnresolvedSymlink => out.push(format!("{p}|l:")),
                     Node::Removed => {}
                 }
             }

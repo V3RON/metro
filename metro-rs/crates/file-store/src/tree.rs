@@ -85,13 +85,66 @@ impl Hasher for FxHasher {
     }
 }
 
-pub(crate) type Children = HashMap<Box<str>, FileId, BuildHasherDefault<FxHasher>>;
+/// The children of a directory: a JS `Map<string, MixedNode>`. Iteration
+/// order is insertion order, like a `Map`: setting an existing key keeps its
+/// position, deleting a key and setting it again moves it to the end. Every
+/// observable listing (`getAllFiles`, `matchFiles`, `metadataIterator`, the
+/// order of `removedFiles`) depends on this order.
+#[derive(Default)]
+pub(crate) struct Children {
+    map: HashMap<Box<str>, (FileId, u32), BuildHasherDefault<FxHasher>>,
+    next_seq: u32,
+}
+
+impl Children {
+    pub(crate) fn get(&self, name: &str) -> Option<FileId> {
+        self.map.get(name).map(|(id, _)| *id)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// `map.set(name, id)`: returns the replaced id. A replaced key keeps its
+    /// position.
+    pub(crate) fn insert(&mut self, name: &str, id: FileId) -> Option<FileId> {
+        if let Some(entry) = self.map.get_mut(name) {
+            return Some(std::mem::replace(&mut entry.0, id));
+        }
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.map.insert(name.into(), (id, seq));
+        None
+    }
+
+    pub(crate) fn remove(&mut self, name: &str) -> Option<FileId> {
+        self.map.remove(name).map(|(id, _)| id)
+    }
+
+    /// `map.entries()`, in insertion order.
+    pub(crate) fn ordered(&self) -> Vec<(&str, FileId)> {
+        let mut entries: Vec<(&str, FileId, u32)> = self
+            .map
+            .iter()
+            .map(|(k, (id, seq))| (&**k, *id, *seq))
+            .collect();
+        entries.sort_unstable_by_key(|e| e.2);
+        entries.into_iter().map(|(k, id, _)| (k, id)).collect()
+    }
+
+    pub(crate) fn into_ids(self) -> impl Iterator<Item = FileId> {
+        self.map.into_values().map(|(id, _)| id)
+    }
+}
 
 pub(crate) enum Node {
     Dir(Children),
     File,
     /// The stored target: a normal path with POSIX separators.
     Symlink(Box<str>),
+    /// A symlink whose target has not been read yet (`metadata[H.SYMLINK] ===
+    /// 1`). Traversing through it fails the JS `invariant`.
+    UnresolvedSymlink,
     Removed,
 }
 
@@ -139,7 +192,7 @@ impl Nodes {
             return None;
         }
         match self.get(dir) {
-            Node::Dir(c) => c.get(name).copied(),
+            Node::Dir(c) => c.get(name),
             _ => None,
         }
     }
@@ -158,7 +211,23 @@ impl Nodes {
     /// `directory.keys()`, collected.
     pub(crate) fn child_names(&self, dir: FileId) -> Vec<String> {
         match self.get(dir) {
-            Node::Dir(c) => c.keys().map(|k| k.to_string()).collect(),
+            Node::Dir(c) => c
+                .ordered()
+                .into_iter()
+                .map(|(k, _)| k.to_string())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `directory.entries()`, collected, in insertion order. Empty for the
+    /// detached directory and for non-directories.
+    pub(crate) fn ordered_children(&self, dir: FileId) -> Vec<(&str, FileId)> {
+        if dir == FileId::PHANTOM {
+            return Vec::new();
+        }
+        match self.get(dir) {
+            Node::Dir(c) => c.ordered(),
             _ => Vec::new(),
         }
     }
@@ -184,7 +253,7 @@ impl Nodes {
             return;
         }
         let replaced = match self.get_mut(dir) {
-            Node::Dir(c) => c.insert(name.into(), id),
+            Node::Dir(c) => c.insert(name, id),
             _ => None,
         };
         if let Some(old) = replaced {
@@ -198,7 +267,7 @@ impl Nodes {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if let Node::Dir(c) = std::mem::replace(self.get_mut(id), Node::Removed) {
-                stack.extend(c.into_values());
+                stack.extend(c.into_ids());
             }
         }
     }
@@ -211,6 +280,11 @@ pub(crate) trait NodeAccess {
     /// Creates (and attaches) an empty directory. Only called when
     /// `make_directories` is set.
     fn make_dir(&mut self, parent: FileId, name: &str) -> FileId;
+    /// `changeListener.directoryAdded(canonicalPath)`, called before the
+    /// directory is created. `None`: no listener, the path is not built.
+    fn directory_listener(&mut self) -> Option<&mut dyn FnMut(&str)> {
+        None
+    }
 }
 
 pub(crate) struct ReadOnly<'a>(pub(crate) &'a Nodes);
@@ -225,6 +299,26 @@ impl NodeAccess for ReadOnly<'_> {
 }
 
 pub(crate) struct ReadWrite<'a>(pub(crate) &'a mut Nodes);
+
+/// `ReadWrite` with a `changeListener.directoryAdded`.
+pub(crate) struct ReadWriteListen<'a, 'l>(
+    pub(crate) &'a mut Nodes,
+    pub(crate) &'l mut dyn FnMut(&str),
+);
+
+impl NodeAccess for ReadWriteListen<'_, '_> {
+    fn nodes(&self) -> &Nodes {
+        self.0
+    }
+    fn make_dir(&mut self, parent: FileId, name: &str) -> FileId {
+        let id = self.0.alloc(Node::Dir(Children::default()));
+        self.0.set_child(parent, name, id);
+        id
+    }
+    fn directory_listener(&mut self) -> Option<&mut dyn FnMut(&str)> {
+        Some(&mut *self.1)
+    }
+}
 
 impl NodeAccess for ReadWrite<'_> {
     fn nodes(&self) -> &Nodes {
@@ -437,6 +531,14 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
                     });
                 }
                 if opts.make_directories {
+                    if let Some(listener) = acc.directory_listener() {
+                        let canonical_path = if is_last_segment {
+                            target_normal_path
+                        } else {
+                            &target_normal_path[..from_idx - 1]
+                        };
+                        listener(canonical_path);
+                    }
                     acc.make_dir(parent_node, segment_name)
                 } else {
                     // A fresh `new Map()` that is never attached to the tree.
