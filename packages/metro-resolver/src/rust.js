@@ -61,7 +61,7 @@ type RustResolution =
 
 type ResolverBinding = {
   ResolverConfig: Class<RustResolverConfig> & {
-    new (options: {...}): RustResolverConfig,
+    new(options: {...}): RustResolverConfig,
   },
   resolverResolve(
     config: RustResolverConfig,
@@ -84,6 +84,7 @@ const NATIVE_DOES_FILE_EXIST = 16;
 const NATIVE_GET_PACKAGE = 32;
 const NATIVE_GET_PACKAGE_FOR_MODULE = 64;
 const VERIFY = 128;
+const EXTRA_NODE_MODULES = 256;
 
 // Indices passed to `callbackTrampoline`. Keep in sync with resolver.rs.
 const CB_FILE_SYSTEM_LOOKUP = 0;
@@ -94,6 +95,7 @@ const CB_RESOLVE_HASTE_MODULE = 4;
 const CB_RESOLVE_HASTE_PACKAGE = 5;
 const CB_RESOLVE_ASSET = 6;
 const CB_LOG_WARNING = 7;
+const CB_EXTRA_NODE_MODULE = 8;
 
 // Returned to Rust instead of a value when a callback throws. Rust then
 // returns {error: 'Host'} and the exception is rethrown unchanged.
@@ -114,10 +116,15 @@ export function getResolverBinding(
 ): ?ResolverBinding {
   const metroRust = process.env.METRO_RUST;
   if (metroRust !== lastMetroRust) {
-    lastMetroRust = metroRust;
-    lastEnvDecides = parseMetroRust(metroRust) != null;
+    // Either call may throw (an invalid METRO_RUST, a missing binding). The
+    // cache is only updated once both succeed, so the next resolve throws
+    // again instead of silently running JS.
+    const envDecides = parseMetroRust(metroRust) != null;
     // $FlowFixMe[incompatible-type] The binding exports more than version().
-    lastEnvBinding = getRustBinding('resolver');
+    const envBinding: ?ResolverBinding = getRustBinding('resolver');
+    lastEnvDecides = envDecides;
+    lastEnvBinding = envBinding;
+    lastMetroRust = metroRust;
   }
   if (lastEnvDecides) {
     return lastEnvBinding;
@@ -137,11 +144,12 @@ let lastVerify = false;
 function isVerifyEnabled(): boolean {
   const verify = process.env.METRO_RUST_VERIFY;
   if (verify !== lastMetroRustVerify) {
-    lastMetroRustVerify = verify;
+    // Cached only after isRustEnabled succeeds (it throws on an invalid list).
     lastVerify =
       verify != null &&
       verify !== '' &&
       isRustEnabled('resolver', null, {METRO_RUST: verify});
+    lastMetroRustVerify = verify;
   }
   return lastVerify;
 }
@@ -222,6 +230,19 @@ function callbackTrampoline(
         // $FlowFixMe[incompatible-type]
         context.unstable_logWarning(a);
         return null;
+      case CB_EXTRA_NODE_MODULE: {
+        // `extraNodeModules[packageName]`, read on the object itself (it may
+        // be a Proxy or have getters). resolve.js follows truthy values and
+        // joins them as paths, so a truthy non-string throws here as it
+        // would there.
+        const packageName: string = a as any;
+        const target = context.extraNodeModules?.[packageName];
+        if (!target) {
+          return null;
+        }
+        // $FlowFixMe[incompatible-type]
+        return typeof target === 'string' ? target : path.join(target, '.');
+      }
       default:
         throw new Error(`metro-resolver: unknown Rust callback ${index}`);
     }
@@ -232,103 +253,163 @@ function callbackTrampoline(
   }
 }
 
-type ConfigEntry = {
-  assetExts: ReadonlySet<string>,
+// The configuration values a handle is built from, as plain data, compared
+// by content on every resolve (cheap: a few short arrays). Matching by
+// content keeps one handle for equal configurations, also when Metro builds
+// a new assetExts Set after every change batch, and notices in-place changes
+// such as sourceExts.push(...).
+type ConfigSnapshot = {
+  assetExts: Array<string>,
   disableHierarchicalLookup: boolean,
-  extraNodeModules: ResolutionContext['extraNodeModules'],
-  mainFields: ReadonlyArray<string>,
-  nodeModulesPaths: ReadonlyArray<string>,
+  mainFields: Array<string>,
+  nodeModulesPaths: Array<string>,
   preferNativePlatform: boolean,
-  sourceExts: ReadonlyArray<string>,
-  unstable_conditionNames: ReadonlyArray<string>,
-  unstable_conditionsByPlatform: ResolutionContext['unstable_conditionsByPlatform'],
+  sourceExts: Array<string>,
+  unstable_conditionNames: Array<string>,
+  unstable_conditionsByPlatform: Array<[string, Array<string>]>,
   unstable_enablePackageExports: boolean,
   unstable_incrementalResolution: boolean,
-  handle: RustResolverConfig,
 };
 
-// Config handles, keyed by the identity of the context's `sourceExts` array
-// and matched on the identity of every other configuration value. Metro
-// passes the same objects for every resolution.
-const configHandles: WeakMap<
-  ReadonlyArray<string>,
-  Array<ConfigEntry>,
-> = new WeakMap();
+type ConfigEntry = {snapshot: ConfigSnapshot, handle: RustResolverConfig};
+
+// Most recently used first. A handle holds the "exports" cache, so reusing it
+// matters; the list is bounded so configurations that are never seen again
+// are dropped.
+const configHandles: Array<ConfigEntry> = [];
+const MAX_CONFIG_HANDLES = 8;
+
+function sameStrings(
+  snapshot: ReadonlyArray<string>,
+  values: Iterable<string>,
+  size: number,
+): boolean {
+  if (snapshot.length !== size) {
+    return false;
+  }
+  let i = 0;
+  for (const value of values) {
+    if (snapshot[i++] !== value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function matches(
+  snapshot: ConfigSnapshot,
+  context: ResolutionContext,
+): boolean {
+  if (
+    snapshot.disableHierarchicalLookup !==
+      (context.disableHierarchicalLookup === true) ||
+    snapshot.preferNativePlatform !== (context.preferNativePlatform === true) ||
+    snapshot.unstable_enablePackageExports !==
+      (context.unstable_enablePackageExports === true) ||
+    snapshot.unstable_incrementalResolution !==
+      (context.unstable_incrementalResolution === true) ||
+    !sameStrings(
+      snapshot.sourceExts,
+      context.sourceExts,
+      context.sourceExts.length,
+    ) ||
+    !sameStrings(
+      snapshot.mainFields,
+      context.mainFields,
+      context.mainFields.length,
+    ) ||
+    !sameStrings(
+      snapshot.nodeModulesPaths,
+      context.nodeModulesPaths,
+      context.nodeModulesPaths.length,
+    ) ||
+    !sameStrings(
+      snapshot.unstable_conditionNames,
+      context.unstable_conditionNames,
+      context.unstable_conditionNames.length,
+    ) ||
+    !sameStrings(snapshot.assetExts, context.assetExts, context.assetExts.size)
+  ) {
+    return false;
+  }
+  const byPlatform = context.unstable_conditionsByPlatform ?? {};
+  const platforms = Object.keys(byPlatform);
+  if (platforms.length !== snapshot.unstable_conditionsByPlatform.length) {
+    return false;
+  }
+  for (let i = 0; i < platforms.length; i++) {
+    const [platform, names] = snapshot.unstable_conditionsByPlatform[i];
+    const current = byPlatform[platforms[i]];
+    if (
+      platforms[i] !== platform ||
+      current == null ||
+      !sameStrings(names, current, current.length)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function snapshotOf(context: ResolutionContext): ConfigSnapshot {
+  return {
+    assetExts: [...context.assetExts],
+    disableHierarchicalLookup: context.disableHierarchicalLookup === true,
+    mainFields: [...context.mainFields],
+    nodeModulesPaths: [...context.nodeModulesPaths],
+    preferNativePlatform: context.preferNativePlatform === true,
+    sourceExts: [...context.sourceExts],
+    unstable_conditionNames: [...context.unstable_conditionNames],
+    unstable_conditionsByPlatform: Object.entries(
+      context.unstable_conditionsByPlatform ?? {},
+    ).map(([platform, names]) => [
+      platform,
+      // $FlowFixMe[incompatible-type]
+      [...names],
+    ]),
+    unstable_enablePackageExports:
+      context.unstable_enablePackageExports === true,
+    unstable_incrementalResolution:
+      context.unstable_incrementalResolution === true,
+  };
+}
 
 function getConfigHandle(
   binding: ResolverBinding,
   context: ResolutionContext,
 ): RustResolverConfig {
-  let entries = configHandles.get(context.sourceExts);
-  if (entries == null) {
-    entries = [];
-    configHandles.set(context.sourceExts, entries);
-  }
-  for (const entry of entries) {
-    if (
-      entry.assetExts === context.assetExts &&
-      entry.disableHierarchicalLookup === context.disableHierarchicalLookup &&
-      entry.extraNodeModules === context.extraNodeModules &&
-      entry.mainFields === context.mainFields &&
-      entry.nodeModulesPaths === context.nodeModulesPaths &&
-      entry.preferNativePlatform === context.preferNativePlatform &&
-      entry.unstable_conditionNames === context.unstable_conditionNames &&
-      entry.unstable_conditionsByPlatform ===
-        context.unstable_conditionsByPlatform &&
-      entry.unstable_enablePackageExports ===
-        context.unstable_enablePackageExports &&
-      entry.unstable_incrementalResolution ===
-        context.unstable_incrementalResolution
-    ) {
+  for (let i = 0; i < configHandles.length; i++) {
+    const entry = configHandles[i];
+    if (matches(entry.snapshot, context)) {
+      if (i !== 0) {
+        configHandles.splice(i, 1);
+        configHandles.unshift(entry);
+      }
       return entry.handle;
     }
   }
-  const extraNodeModules: {[string]: string} = {};
-  if (context.extraNodeModules != null) {
-    for (const [name, target] of Object.entries(context.extraNodeModules)) {
-      // resolve.js only follows truthy entries, joined as paths.
-      if (typeof target === 'string' && target !== '') {
-        extraNodeModules[name] = target;
-      }
-    }
-  }
+  const snapshot = snapshotOf(context);
   const handle = new binding.ResolverConfig({
-    assetExts: [...context.assetExts],
-    disableHierarchicalLookup: context.disableHierarchicalLookup === true,
-    extraNodeModules:
-      context.extraNodeModules != null ? extraNodeModules : undefined,
-    mainFields: [...context.mainFields],
-    nodeModulesPaths: [...context.nodeModulesPaths],
-    preferNativePlatform: context.preferNativePlatform === true,
-    sourceExts: [...context.sourceExts],
-    unstableConditionNames: [...context.unstable_conditionNames],
+    assetExts: snapshot.assetExts,
+    disableHierarchicalLookup: snapshot.disableHierarchicalLookup,
+    // Asked per package name through the trampoline (EXTRA_NODE_MODULES), so
+    // a Proxy or getters work as in JS.
+    extraNodeModules: undefined,
+    mainFields: snapshot.mainFields,
+    nodeModulesPaths: snapshot.nodeModulesPaths,
+    preferNativePlatform: snapshot.preferNativePlatform,
+    sourceExts: snapshot.sourceExts,
+    unstableConditionNames: snapshot.unstable_conditionNames,
     unstableConditionsByPlatform: Object.fromEntries(
-      Object.entries(context.unstable_conditionsByPlatform ?? {}).map(
-        ([platform, names]) => [
-          platform,
-          // $FlowFixMe[incompatible-type]
-          [...names],
-        ],
-      ),
+      snapshot.unstable_conditionsByPlatform,
     ),
-    unstableEnablePackageExports: context.unstable_enablePackageExports === true,
-    unstableIncrementalResolution:
-      context.unstable_incrementalResolution === true,
+    unstableEnablePackageExports: snapshot.unstable_enablePackageExports,
+    unstableIncrementalResolution: snapshot.unstable_incrementalResolution,
   });
-  entries.push({
-    assetExts: context.assetExts,
-    disableHierarchicalLookup: context.disableHierarchicalLookup,
-    extraNodeModules: context.extraNodeModules,
-    mainFields: context.mainFields,
-    nodeModulesPaths: context.nodeModulesPaths,
-    preferNativePlatform: context.preferNativePlatform,
-    sourceExts: context.sourceExts,
-    unstable_conditionNames: context.unstable_conditionNames,
-    unstable_conditionsByPlatform: context.unstable_conditionsByPlatform,
-    unstable_enablePackageExports: context.unstable_enablePackageExports,
-    unstable_incrementalResolution: context.unstable_incrementalResolution,
-    handle,
-  });
+  configHandles.unshift({snapshot, handle});
+  if (configHandles.length > MAX_CONFIG_HANDLES) {
+    configHandles.pop();
+  }
   return handle;
 }
 
@@ -359,6 +440,9 @@ export function resolveWithRust(
   }
   if (context.isESMImport === true) {
     flags |= IS_ESM_IMPORT;
+  }
+  if (context.extraNodeModules) {
+    flags |= EXTRA_NODE_MODULES;
   }
 
   // The same branch order as resolve.js: only a specifier that is not
@@ -446,7 +530,10 @@ export function resolveWithRust(
   throw toJsError(error);
 }
 
-function toJsError(error: {readonly error: string, readonly [string]: any}): unknown {
+function toJsError(error: {
+  readonly error: string,
+  readonly [string]: any,
+}): unknown {
   switch (error.error) {
     case 'Host': {
       const thrown = thrownError;

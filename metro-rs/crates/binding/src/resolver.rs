@@ -29,6 +29,7 @@ const NATIVE_DOES_FILE_EXIST: u32 = 16;
 const NATIVE_GET_PACKAGE: u32 = 32;
 const NATIVE_GET_PACKAGE_FOR_MODULE: u32 = 64;
 const VERIFY: u32 = 128;
+const EXTRA_NODE_MODULES: u32 = 256;
 
 // Trampoline indices. Keep in sync with metro-resolver/src/rust.js.
 const CB_FILE_SYSTEM_LOOKUP: u32 = 0;
@@ -39,6 +40,7 @@ const CB_RESOLVE_HASTE_MODULE: u32 = 4;
 const CB_RESOLVE_HASTE_PACKAGE: u32 = 5;
 const CB_RESOLVE_ASSET: u32 = 6;
 const CB_LOG_WARNING: u32 = 7;
+const CB_EXTRA_NODE_MODULE: u32 = 8;
 
 // Entry kinds of `FileStore.rebuild` / `applyChanges`. Keep in sync with
 // RustFileStore.js.
@@ -117,9 +119,7 @@ impl FileStore {
 
     fn borrow_mut(&self) -> Result<std::cell::RefMut<'_, Store>> {
         self.store.try_borrow_mut().map_err(|_| {
-            napi::Error::from_reason(
-                "metro-rs: the file store cannot change during a resolve (a resolver callback changed the file map)",
-            )
+            napi::Error::from_reason("metro-rs: the file store is already being changed")
         })
     }
 
@@ -207,7 +207,9 @@ impl FileStore {
 struct Host<'a> {
     env: &'a Env,
     callback: &'a JsFunction,
-    store: Option<&'a Store>,
+    // Borrowed only for the duration of each native query, never while JS
+    // runs, so a callback may change the store (rule 8).
+    store: Option<&'a RefCell<Store>>,
     flags: u32,
 }
 
@@ -230,12 +232,20 @@ impl Host<'_> {
         self.flags & flag != 0
     }
 
-    fn native_store(&self, flag: u32) -> Option<&Store> {
-        if self.has(flag) {
-            self.store
-        } else {
-            None
+    /// Runs a query on the store when `flag` says the callback is answered
+    /// natively. `None` (ask JS instead) when it is not, when the store is
+    /// being changed, or when the store hits a case where the JS file map
+    /// throws an invariant error, so that the JS exception is kept.
+    fn native<T, E>(
+        &self,
+        flag: u32,
+        query: impl FnOnce(&Store) -> std::result::Result<T, E>,
+    ) -> Option<T> {
+        if !self.has(flag) {
+            return None;
         }
+        let store = self.store?.try_borrow().ok()?;
+        query(&store).ok()
     }
 
     /// Calls the trampoline. A callback that threw comes back as a symbol.
@@ -412,19 +422,9 @@ fn same_package_json(a: &Option<PackageJson>, b: &Option<PackageJson>) -> bool {
     }
 }
 
-/// Runs a native store query. The store panics in the few places where the
-/// JS file map throws an invariant error (see the file-store crate); those
-/// queries go to the JS callback instead, so the JS exception is kept.
-fn native<T>(query: impl FnOnce() -> T) -> Option<T> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(query)).ok()
-}
-
 impl ResolverHost for Host<'_> {
     fn file_system_lookup(&self, path: &str) -> std::result::Result<Lookup, HostError> {
-        match self
-            .native_store(NATIVE_FILE_SYSTEM_LOOKUP)
-            .and_then(|store| native(|| store.lookup(path)))
-        {
+        match self.native(NATIVE_FILE_SYSTEM_LOOKUP, |store| store.lookup(path)) {
             Some(native) => self.verify(
                 "fileSystemLookup",
                 path,
@@ -437,10 +437,7 @@ impl ResolverHost for Host<'_> {
     }
 
     fn does_file_exist(&self, path: &str) -> std::result::Result<bool, HostError> {
-        match self
-            .native_store(NATIVE_DOES_FILE_EXIST)
-            .and_then(|store| native(|| store.exists(path)))
-        {
+        match self.native(NATIVE_DOES_FILE_EXIST, |store| store.exists(path)) {
             Some(native) => self.verify(
                 "doesFileExist",
                 path,
@@ -453,10 +450,7 @@ impl ResolverHost for Host<'_> {
     }
 
     fn get_package(&self, path: &str) -> std::result::Result<Option<PackageJson>, HostError> {
-        match self
-            .native_store(NATIVE_GET_PACKAGE)
-            .and_then(|s| native(|| s.get_package(path)))
-        {
+        match self.native(NATIVE_GET_PACKAGE, |s| Ok::<_, ()>(s.get_package(path))) {
             Some(StoreAnswer::Answer(native)) => self.verify(
                 "getPackage",
                 path,
@@ -473,10 +467,9 @@ impl ResolverHost for Host<'_> {
         &self,
         path: &str,
     ) -> std::result::Result<Option<PackageForModule>, HostError> {
-        match self
-            .native_store(NATIVE_GET_PACKAGE_FOR_MODULE)
-            .and_then(|s| native(|| s.get_package_for_module(path)))
-        {
+        match self.native(NATIVE_GET_PACKAGE_FOR_MODULE, |s| {
+            Ok::<_, ()>(s.get_package_for_module(path))
+        }) {
             Some(StoreAnswer::Answer(native)) => self.verify(
                 "getPackageForModule",
                 path,
@@ -519,10 +512,21 @@ impl ResolverHost for Host<'_> {
         Some(files)
     }
 
-    fn log_warning(&self, message: &str) {
-        // `unstable_logWarning` returning or throwing is ignored, as the
-        // trait has no way to fail here (see boundary.md).
-        let _ = self.call(CB_LOG_WARNING, &[message]);
+    fn log_warning(&self, message: &str) -> std::result::Result<(), HostError> {
+        self.call(CB_LOG_WARNING, &[message]).map(|_| ())
+    }
+
+    fn extra_node_module(
+        &self,
+        _config: &Config,
+        package_name: &str,
+    ) -> std::result::Result<Option<String>, HostError> {
+        if !self.has(EXTRA_NODE_MODULES) {
+            return Ok(None);
+        }
+        // The trampoline returns null unless the entry is truthy, and throws
+        // (as JS would when joining it) for a truthy non-string.
+        self.js_string_or_null(CB_EXTRA_NODE_MODULE, &[package_name])
     }
 
     fn can_parse_url(&self, _specifier: &str) -> bool {
@@ -547,17 +551,10 @@ pub fn resolver_resolve(
     flags: u32,
     callback: JsFunction,
 ) -> Result<JsUnknown> {
-    let store_ref =
-        match &store {
-            Some(store) => Some(store.store.try_borrow().map_err(|_| {
-                napi::Error::from_reason("metro-rs: the file store is being changed")
-            })?),
-            None => None,
-        };
     let host = Host {
         env: &env,
         callback: &callback,
-        store: store_ref.as_deref(),
+        store: store.as_ref().map(|store| &store.store),
         flags,
     };
     let options = Value::Object(Default::default());
