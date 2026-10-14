@@ -42,14 +42,23 @@ import path from 'node:path';
 /**
  * Metro tags the `fileSystemLookup`, `doesFileExist`, `getPackage` and
  * `getPackageForModule` callbacks it creates with this symbol. The value is
- * the file store (a Rust replica of its file map) that answers the same
- * questions natively. A callback without the tag, or replaced by the caller,
- * is called through JS.
+ * the file store that answers the same questions natively: a Rust replica of
+ * its file map, or the Rust file map itself (its `RustFileSystem`). A callback
+ * without the tag, or replaced by the caller, is called through JS.
+ *
+ * With the Rust file map, `resolveHasteModule` and `resolveHastePackage` carry
+ * the tag too, and `HASTE_PLATFORM` names the platform they are bound to.
+ * They are answered natively only for a resolve of that platform.
  */
 export const FILE_STORE: symbol = Symbol.for('metro.resolver.fileStore');
+export const HASTE_PLATFORM: symbol = Symbol.for(
+  'metro.resolver.hastePlatform',
+);
 
 export type NativeFileStore = {...};
-export type FileStoreHolder = {readonly native: NativeFileStore, ...};
+export interface FileStoreHolder {
+  readonly native: NativeFileStore;
+}
 
 type RustResolverConfig = {...};
 
@@ -85,6 +94,7 @@ const NATIVE_GET_PACKAGE = 32;
 const NATIVE_GET_PACKAGE_FOR_MODULE = 64;
 const VERIFY = 128;
 const EXTRA_NODE_MODULES = 256;
+const NATIVE_HASTE = 512;
 
 // Indices passed to `callbackTrampoline`. Keep in sync with resolver.rs.
 const CB_FILE_SYSTEM_LOOKUP = 0;
@@ -484,6 +494,22 @@ function nativeStoreOf(callback: unknown): ?NativeFileStore {
 }
 
 /**
+ * Whether a Haste callback is Metro's own, bound to this store and to the
+ * platform of this resolve.
+ */
+function isNativeHaste(
+  callback: unknown,
+  store: NativeFileStore,
+  platform: ?string,
+): boolean {
+  return (
+    nativeStoreOf(callback) === store &&
+    // $FlowFixMe[incompatible-use]
+    callback?.[HASTE_PLATFORM] === (platform ?? null)
+  );
+}
+
+/**
  * Resolve in Rust. `resolve` is the public (switched) `resolve`, which custom
  * and scheme resolvers receive as `context.resolveRequest`.
  */
@@ -555,6 +581,12 @@ export function resolveWithRust(
     }
     if (nativeStoreOf(context.getPackageForModule) === store) {
       flags |= NATIVE_GET_PACKAGE_FOR_MODULE;
+    }
+    if (
+      isNativeHaste(context.resolveHasteModule, store, platform) &&
+      isNativeHaste(context.resolveHastePackage, store, platform)
+    ) {
+      flags |= NATIVE_HASTE;
     }
   }
   if (isVerifyEnabled()) {
