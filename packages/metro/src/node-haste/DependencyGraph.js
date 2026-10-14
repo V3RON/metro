@@ -31,6 +31,7 @@ import type {
 import {getDynamicRoots} from '../lib/dynamicRoots';
 import createFileMap from './DependencyGraph/createFileMap';
 import createModuleResolver from './DependencyGraph/createModuleResolver';
+import RustFileStore from './DependencyGraph/RustFileStore';
 import {PackageCache} from './PackageCache';
 import {
   AmbiguousModuleResolutionError,
@@ -40,6 +41,7 @@ import {
 import canonicalize from 'metro-core/private/canonicalize';
 import {DuplicateHasteCandidatesError} from 'metro-file-map';
 import {InvalidPackageError} from 'metro-resolver';
+import {isRustEnabled, loadRustBinding} from 'metro-rust-switch';
 import EventEmitter from 'node:events';
 import path from 'node:path';
 import nullthrows from 'nullthrows';
@@ -65,6 +67,8 @@ export default class DependencyGraph extends EventEmitter {
   _haste: MetroFileMap;
   _fileSystem: FileSystem;
   #packageCache: PackageCache;
+  // The Rust replica of the file map, when the resolver runs in Rust.
+  #rustFileStore: ?RustFileStore = null;
   _hasteMap: HasteMap;
   #dependencyPlugin: ?DependencyPlugin;
   _moduleResolver: ModuleResolver;
@@ -138,6 +142,14 @@ export default class DependencyGraph extends EventEmitter {
         getClosestPackage: absoluteModulePath =>
           this._getClosestPackage(absoluteModulePath),
       });
+      if (isRustEnabled('resolver', config.unstable_rust)) {
+        this.#rustFileStore = new RustFileStore(
+          // The binding exports more than RustBinding's version().
+          loadRustBinding() as any,
+          config.projectRoot,
+          fileSystem,
+        );
+      }
       this._createModuleResolver();
     });
   }
@@ -169,8 +181,11 @@ export default class DependencyGraph extends EventEmitter {
     await this._initializedPromise;
   }
 
-  _onHasteChange({changes, rootDir}: ChangeEvent) {
+  _onHasteChange(changeEvent: ChangeEvent) {
+    const {changes, rootDir} = changeEvent;
     this._resolutionCache = new Map();
+    // Also invalidates the store's package.json cache, as below.
+    this.#rustFileStore?.applyChanges(changeEvent);
     [
       ...changes.addedFiles,
       ...changes.modifiedFiles,
@@ -188,6 +203,7 @@ export default class DependencyGraph extends EventEmitter {
       fileSystem: this._fileSystem,
       hasteMap: this._hasteMap,
       packageCache: this.#packageCache,
+      rustFileStore: this.#rustFileStore,
     });
   }
 

@@ -124,10 +124,10 @@ if want tests; then
     fi
     IGNORE=$(node port/lib/phase.js js-only "$METRO_RUST_LIST" | sed 's/[.]/\\./g' | paste -sd'|' -)
     if [ -n "$IGNORE" ]; then
-      step tests "jest with METRO_RUST=$METRO_RUST_LIST" env METRO_RUST="$METRO_RUST_LIST" \
+      step tests "jest with METRO_RUST=$METRO_RUST_LIST (and METRO_RUST_VERIFY)" env METRO_RUST="$METRO_RUST_LIST" METRO_RUST_VERIFY="$METRO_RUST_LIST" \
         yarn --silent jest --ci --silent --testPathIgnorePatterns "($IGNORE)" '/node_modules/' || fail tests 20
     else
-      step tests "jest with METRO_RUST=$METRO_RUST_LIST" env METRO_RUST="$METRO_RUST_LIST" \
+      step tests "jest with METRO_RUST=$METRO_RUST_LIST (and METRO_RUST_VERIFY)" env METRO_RUST="$METRO_RUST_LIST" METRO_RUST_VERIFY="$METRO_RUST_LIST" \
         yarn --silent jest --ci --silent || fail tests 20
     fi
   fi

@@ -12,6 +12,12 @@
  * Timed: `resolve(context, name, platform)` over every recorded resolution,
  * ITERATIONS times, after one warm-up pass. Failures (optional dependencies
  * that do not exist) are part of the workload and are counted.
+ *
+ * When the resolver runs in Rust, Metro's callbacks are tagged with the Rust
+ * replica of its file map (Symbol.for('metro.resolver.fileStore'), see
+ * port/design/boundary.md). The timed region then starts by rebuilding that
+ * replica from the JS file map, which also empties its package.json cache, so
+ * the Rust side pays for the replica it needs. The JS side has no replica.
  */
 'use strict';
 
@@ -62,8 +68,10 @@ exports.run = async ({pkg, app, cache, now}) => {
   };
 
   const failed = pass();
+  const store = recorded[0]?.context.fileSystemLookup[Symbol.for('metro.resolver.fileStore')];
   const start = now();
+  if (store != null) store.rebuild();
   for (let i = 0; i < ITERATIONS; i++) pass();
   const ms = now() - start;
-  return {ms, extra: {resolutions: recorded.length, failed, iterations: ITERATIONS}};
+  return {ms, extra: {resolutions: recorded.length, failed, iterations: ITERATIONS, replica: store != null}};
 };

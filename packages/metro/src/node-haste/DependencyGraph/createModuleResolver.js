@@ -10,12 +10,14 @@
  */
 
 import type {PackageCache} from '../PackageCache';
+import type RustFileStore from './RustFileStore';
 import type {ConfigT} from 'metro-config';
 import type {FileSystem, HasteMap} from 'metro-file-map';
 import type {FileSystemLookup} from 'metro-resolver';
 
 import getSchemeResolvers from '../../lib/getSchemeResolvers';
 import {ModuleResolver} from './ModuleResolution';
+import {FILE_STORE} from 'metro-resolver/private/rust';
 import path from 'node:path';
 
 export type CreateModuleResolverOptions = Readonly<{
@@ -23,6 +25,9 @@ export type CreateModuleResolverOptions = Readonly<{
   fileSystem: FileSystem,
   hasteMap: HasteMap,
   packageCache: PackageCache,
+  // The Rust replica of `fileSystem` and `packageCache`, when the resolver
+  // runs in Rust (METRO_RUST / unstable_rust).
+  rustFileStore?: ?RustFileStore,
 }>;
 
 export default function createModuleResolver({
@@ -30,6 +35,7 @@ export default function createModuleResolver({
   fileSystem,
   hasteMap,
   packageCache,
+  rustFileStore,
 }: CreateModuleResolverOptions): ModuleResolver {
   const fileSystemLookup = (filePath: string): ReturnType<FileSystemLookup> => {
     const result = fileSystem.lookup(filePath);
@@ -42,11 +48,37 @@ export default function createModuleResolver({
     }
     return {exists: false};
   };
+  const doesFileExist = (filePath: string) => fileSystem.exists(filePath);
+  const getPackage = (packageJsonPath: string) => {
+    try {
+      return packageCache.getPackage(packageJsonPath).packageJson ?? null;
+    } catch {
+      // Non-existence or malformed JSON, we treat both as non-existent
+      return null;
+    }
+  };
+  const getPackageForModule = (absolutePath: string) =>
+    packageCache.getPackageForModule(absolutePath);
+
+  if (rustFileStore != null) {
+    // The Rust resolver answers these natively from the store, and calls
+    // them only when the store defers (see metro-resolver/src/rust.js).
+    for (const callback of [
+      fileSystemLookup,
+      doesFileExist,
+      getPackage,
+      getPackageForModule,
+    ]) {
+      // $FlowFixMe[invalid-computed-prop]
+      // $FlowFixMe[prop-missing]
+      callback[FILE_STORE] = rustFileStore;
+    }
+  }
 
   return new ModuleResolver({
     assetExts: new Set(config.resolver.assetExts),
     disableHierarchicalLookup: config.resolver.disableHierarchicalLookup,
-    doesFileExist: (filePath: string) => fileSystem.exists(filePath),
+    doesFileExist,
     emptyModulePath: config.resolver.emptyModulePath,
     extraNodeModules: config.resolver.extraNodeModules,
     fileSystemLookup,
@@ -54,16 +86,8 @@ export default function createModuleResolver({
       hasteMap.getModule(name, platform, true),
     getHastePackagePath: (name, platform) =>
       hasteMap.getPackage(name, platform, true),
-    getPackage: (packageJsonPath: string) => {
-      try {
-        return packageCache.getPackage(packageJsonPath).packageJson ?? null;
-      } catch {
-        // Non-existence or malformed JSON, we treat both as non-existent
-        return null;
-      }
-    },
-    getPackageForModule: (absolutePath: string) =>
-      packageCache.getPackageForModule(absolutePath),
+    getPackage,
+    getPackageForModule,
     mainFields: config.resolver.resolverMainFields,
     nodeModulesPaths: config.resolver.nodeModulesPaths,
     preferNativePlatform: true,
