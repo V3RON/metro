@@ -69,6 +69,12 @@ pub enum NodeLookup {
 /// `M` is the caller's per-file payload (the file's metadata), supplied with
 /// each added or modified entry. The store never looks at it.
 pub trait ChangeSink<M> {
+    /// Whether this is a `changeListener` in the JS sense. Only then does
+    /// `bulkAddOrModify` check that a modified file is not a directory; the
+    /// mutation methods without a listener overwrite whatever is there.
+    fn is_listener(&self) -> bool {
+        true
+    }
     fn directory_added(&mut self, canonical_path: &str);
     fn directory_removed(&mut self, canonical_path: &str);
     /// A new file or symlink node `id`.
@@ -630,7 +636,7 @@ impl FileStore {
                 }
                 Some(sink) => {
                     let existing = self.nodes.child(directory_node, basename);
-                    if let Some(existing) = existing {
+                    if let Some(existing) = existing.filter(|_| sink.is_listener()) {
                         if self.nodes.is_directory(existing) {
                             return Err(FileStoreError(format!(
                                 "Detected addition or modification of file {normal_path}, but it is tracked as a non-empty directory"
