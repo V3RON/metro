@@ -249,11 +249,7 @@
         "/root/node_modules/pkg/rn.js": ""
       },
       "context": {
-        "mainFields": [
-          "react-native",
-          "browser",
-          "main"
-        ]
+        "mainFields": ["react-native", "browser", "main"]
       },
       "origin": "/root/src/main.js",
       "request": "pkg",
@@ -372,9 +368,7 @@
       },
       "context": {
         "disableHierarchicalLookup": true,
-        "nodeModulesPaths": [
-          "/root/vendor"
-        ]
+        "nodeModulesPaths": ["/root/vendor"]
       },
       "origin": "/root/a/main.js",
       "request": "pkg",
@@ -482,9 +476,7 @@
       },
       "context": {
         "unstable_enablePackageExports": true,
-        "unstable_conditionNames": [
-          "require"
-        ]
+        "unstable_conditionNames": ["require"]
       },
       "origin": "/root/src/main.js",
       "request": "pkg",
@@ -677,20 +669,14 @@
         "/root/src/img@2x.png": ""
       },
       "assets": {
-        "/root/src/img.png": [
-          "/root/src/img.png",
-          "/root/src/img@2x.png"
-        ]
+        "/root/src/img.png": ["/root/src/img.png", "/root/src/img@2x.png"]
       },
       "origin": "/root/src/main.js",
       "request": "./img.png",
       "platform": null,
       "expect": {
         "type": "assetFiles",
-        "filePaths": [
-          "/root/src/img.png",
-          "/root/src/img@2x.png"
-        ]
+        "filePaths": ["/root/src/img.png", "/root/src/img@2x.png"]
       },
       "$note": "assets maps \"<dir>/<basename><ext>\" to the files context.resolveAsset(dir, basename, ext) returns"
     },
