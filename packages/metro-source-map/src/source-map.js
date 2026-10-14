@@ -10,6 +10,7 @@
  */
 
 import type {IConsumer} from './Consumer/types';
+import type {SourceMapBinding} from './rust';
 
 import {BundleBuilder, createIndexMap} from './BundleBuilder';
 import composeSourceMaps from './composeSourceMaps';
@@ -21,6 +22,14 @@ import {
   generateFunctionMap,
 } from './generateFunctionMap';
 import Generator from './Generator';
+import {countLines, isVlqMap} from './rawMappings';
+import {getSourceMapBinding} from './rust';
+import {
+  encodeSectionsRust,
+  fromRawMappingsRust,
+  vlqMapFromBabelDecodedMapRust,
+  vlqMapFromTuplesRust,
+} from './rustMappings';
 import nullthrows from 'nullthrows';
 // $FlowFixMe[untyped-import] - source-map
 import SourceMap from 'source-map';
@@ -179,13 +188,23 @@ class IndexedSourceMapResult implements SourceMapGenerator {
   }
 }
 
-function isVlqMap(
-  map: ?ReadonlyArray<MetroSourceMapSegmentTuple> | VlqMap,
-): implies map is VlqMap {
-  return map != null && !Array.isArray(map) && typeof map.mappings === 'string';
+function fromRawMappingsImpl(
+  isBlocking: boolean,
+  onDone: Generator => void,
+  modules: ReadonlyArray<RawMappingsModule>,
+  offsetLines: number,
+): void {
+  const binding = getSourceMapBinding();
+  if (binding != null) {
+    fromRawMappingsRust(binding, isBlocking, onDone, modules, offsetLines, () =>
+      fromRawMappingsJsImpl(isBlocking, onDone, modules, offsetLines),
+    );
+    return;
+  }
+  fromRawMappingsJsImpl(isBlocking, onDone, modules, offsetLines);
 }
 
-function fromRawMappingsImpl(
+function fromRawMappingsJsImpl(
   isBlocking: boolean,
   onDone: Generator => void,
   modules: ReadonlyArray<RawMappingsModule>,
@@ -292,6 +311,13 @@ function fromRawMappingsIndexed(
   modules: ReadonlyArray<RawMappingsModule>,
   offsetLines: number = 0,
 ): IndexedSourceMapResult {
+  const binding = getSourceMapBinding();
+  if (binding != null) {
+    const sections = indexSectionsRust(binding, modules, offsetLines);
+    if (sections != null) {
+      return new IndexedSourceMapResult(sections);
+    }
+  }
   const sections: Array<IndexMapSection> = [];
   let carryOver = offsetLines;
 
@@ -306,6 +332,103 @@ function fromRawMappingsIndexed(
   }
 
   return new IndexedSourceMapResult(sections);
+}
+
+/**
+ * `fromRawMappingsIndexed` with the Rust implementation. VLQ maps still pass
+ * through verbatim in JavaScript; the tuples modules are encoded together in
+ * one call. Returns null to run the JavaScript implementation.
+ */
+function indexSectionsRust(
+  binding: SourceMapBinding,
+  modules: ReadonlyArray<RawMappingsModule>,
+  offsetLines: number,
+): ?Array<IndexMapSection> {
+  const sections: Array<IndexMapSection> = [];
+  // The tuples modules and where their sections go.
+  let pending: Array<RawMappingsModule> = [];
+  let pendingSlots: Array<[number, number]> = [];
+
+  const flush = (): boolean => {
+    if (pending.length === 0) {
+      return true;
+    }
+    const encoded = encodeSectionsRust(binding, pending);
+    if (encoded == null) {
+      return false;
+    }
+    for (let i = 0; i < pending.length; i++) {
+      const [slot, carryOver] = pendingSlots[i];
+      sections[slot] = {
+        offset: {line: carryOver, column: 0},
+        map: sectionMapFromRust(
+          pending[i],
+          encoded.mappings[i],
+          encoded.names[i],
+        ),
+      };
+    }
+    pending = [];
+    pendingSlots = [];
+    return true;
+  };
+
+  let carryOver = offsetLines;
+  for (const mod of modules) {
+    const {map} = mod;
+    if (map != null) {
+      if (isVlqMap(map)) {
+        sections.push({
+          offset: {line: carryOver, column: 0},
+          map: toIndexMapSection(mod),
+        });
+      } else if (Array.isArray(map)) {
+        pendingSlots.push([sections.length, carryOver]);
+        pending.push(mod);
+        sections.push(null as $FlowFixMe);
+      } else {
+        // Earlier modules' errors come first, as in JavaScript.
+        if (!flush()) {
+          return null;
+        }
+        throw new Error(
+          `Unexpected module with full source map found: ${mod.path}`,
+        );
+      }
+    }
+    carryOver = carryOver + countLines(mod.code);
+  }
+  return flush() ? sections : null;
+}
+
+/**
+ * What `Generator.toMap()` returns for a generator with one file, given the
+ * `mappings` and `names` that the Rust implementation encoded for it.
+ */
+function sectionMapFromRust(
+  module: RawMappingsModule,
+  mappings: string,
+  names: Array<string>,
+): BasicSourceMap {
+  const {path, source, functionMap, isIgnored} = module;
+  const sourcesMetadata: {
+    x_facebook_sources?: Array<FBSourceMetadata>,
+  } = functionMap
+    ? {x_facebook_sources: JSON.parse(JSON.stringify([[functionMap]]))}
+    : {};
+  const ignoreList: {x_google_ignoreList?: Array<number>} = isIgnored
+    ? {x_google_ignoreList: [0]}
+    : {};
+  return {
+    version: 3,
+    file: undefined,
+    sources: [path],
+    sourcesContent: [source],
+    ...sourcesMetadata,
+    ...ignoreList,
+    names,
+    mappings,
+  } as BasicSourceMap;
 }
 
 /**
@@ -490,11 +613,6 @@ function addMapping(
   throw new Error(`Invalid mapping: [${mapping.join(', ')}]`);
 }
 
-const newline = /\r\n?|\n|\u2028|\u2029/g;
-
-const countLines = (string: string): number =>
-  (string.match(newline) || []).length + 1;
-
 /**
  * Decodes a compact VLQ map back into raw mapping tuples — the inverse of
  * `vlqMapFromTuples`, reusing Metro's existing source-map consumer.
@@ -517,6 +635,13 @@ function decodeVlqMap(vlqMap: VlqMap): Array<MetroSourceMapSegmentTuple> {
 function vlqMapFromTuples(
   mappings: ReadonlyArray<MetroSourceMapSegmentTuple>,
 ): VlqMap {
+  const binding = getSourceMapBinding();
+  if (binding != null) {
+    const vlqMap = vlqMapFromTuplesRust(binding, mappings);
+    if (vlqMap != null) {
+      return vlqMap;
+    }
+  }
   const generator = new Generator();
   generator.startFile('', '', null);
   for (const mapping of mappings) {
@@ -546,6 +671,17 @@ function vlqMapFromBabelDecodedMap(
   decodedMap: BabelDecodedMap,
   terminatingMapping: [number, number],
 ): VlqMap {
+  const binding = getSourceMapBinding();
+  if (binding != null) {
+    const vlqMap = vlqMapFromBabelDecodedMapRust(
+      binding,
+      decodedMap,
+      terminatingMapping,
+    );
+    if (vlqMap != null) {
+      return vlqMap;
+    }
+  }
   const generator = new Generator();
   generator.startFile('', '', null);
   const {mappings, names} = decodedMap;

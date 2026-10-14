@@ -20,6 +20,8 @@ import type {Number0, Number1} from 'ob1';
 
 import B64Builder from './B64Builder';
 import Consumer from './Consumer';
+import MappingsConsumer from './Consumer/MappingsConsumer';
+import {getSourceMapBinding} from './rust';
 import {get0, get1} from 'ob1';
 
 // TODO(t67648443): Bypass the `sort-requires` rule for this file because of a dependency cycle.
@@ -47,6 +49,135 @@ export default function composeSourceMaps(
     })
     .reverse();
 
+  const composed =
+    composeMappingsRust(consumers) ?? composeMappingsJs(consumers);
+  const {sources, mappings} = composed;
+
+  const composedMap: {
+    version: number,
+    sources: Array<string>,
+    names: Array<string>,
+    mappings: string,
+    file?: string,
+    sourcesContent?: Array<?string>,
+    x_facebook_sources?: FBSourcesArray,
+    x_hermes_function_offsets?: HermesFunctionOffsets,
+    x_google_ignoreList?: Array<number>,
+  } = {version: 3, sources, names: composed.names, mappings};
+  const {file} = consumers[0];
+  if (file != null) {
+    composedMap.file = file;
+  }
+
+  composedMap.sourcesContent = composedMap.sources.map(source =>
+    consumers[consumers.length - 1].sourceContentFor(source, true),
+  );
+  if (composedMap.sourcesContent.every(content => content == null)) {
+    delete composedMap.sourcesContent;
+  }
+  const metadataConsumer = new SourceMetadataMapConsumer(firstMap);
+  composedMap.x_facebook_sources = metadataConsumer.toArray(
+    composedMap.sources,
+  );
+  const function_offsets = maps[maps.length - 1].x_hermes_function_offsets;
+  if (function_offsets) {
+    composedMap.x_hermes_function_offsets = function_offsets;
+  }
+  const ignoreListConsumer = new GoogleIgnoreListConsumer(firstMap);
+  const x_google_ignoreList = ignoreListConsumer.toArray(composedMap.sources);
+  if (x_google_ignoreList.length) {
+    composedMap.x_google_ignoreList = x_google_ignoreList;
+  }
+  return composedMap;
+}
+
+type ComposedMappings = {
+  sources: Array<string>,
+  names: Array<string>,
+  mappings: string,
+};
+
+/**
+ * The mapping loop of `composeSourceMaps` with the Rust implementation:
+ * chains every mapping of the last map through the earlier maps and encodes
+ * the result. Returns null when it cannot be used, and the JavaScript loop
+ * runs instead: Rust is off, a map is an index map, the mappings of the last
+ * map are not sorted, or a mapping is one that JavaScript rejects (so that it
+ * throws exactly its own error).
+ */
+function composeMappingsRust(
+  consumers: ReadonlyArray<IConsumer>,
+): ?ComposedMappings {
+  const binding = getSourceMapBinding();
+  if (binding == null) {
+    return null;
+  }
+  const allSources: Array<string> = [];
+  const sourceIds: Map<string, number> = new Map();
+  const allNames: Array<string> = [];
+  const nameIds: Map<string, number> = new Map();
+  const inputs = [];
+  for (const consumer of consumers) {
+    if (!(consumer instanceof MappingsConsumer)) {
+      return null;
+    }
+    const decoded = consumer.rustMappingsAndTables();
+    if (decoded == null) {
+      return null;
+    }
+    const {columns, sources, names} = decoded;
+    const sourceMapIds = new Int32Array(sources.length);
+    for (let i = 0; i < sources.length; i++) {
+      const source = sources[i];
+      if (source === '') {
+        // JavaScript rejects mappings whose source is empty.
+        sourceMapIds[i] = -1;
+        continue;
+      }
+      let id = sourceIds.get(source);
+      if (id === undefined) {
+        id = allSources.length;
+        allSources.push(source);
+        sourceIds.set(source, id);
+      }
+      sourceMapIds[i] = id;
+    }
+    const nameMapIds = new Int32Array(names.length);
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      if (typeof name !== 'string') {
+        return null;
+      }
+      let id = nameIds.get(name);
+      if (id === undefined) {
+        id = allNames.length;
+        allNames.push(name);
+        nameIds.set(name, id);
+      }
+      nameMapIds[i] = id;
+    }
+    inputs.push({
+      data: columns.data,
+      lineStarts: columns.lineStarts,
+      sources: sourceMapIds,
+      names: nameMapIds,
+    });
+  }
+  // The last map is looked at first, then the earlier ones in order.
+  const composed = binding.composeMappings(inputs);
+  if (composed == null) {
+    return null;
+  }
+  return {
+    sources: Array.from(composed.sources, id => allSources[id]),
+    names: Array.from(composed.names, id => allNames[id]),
+    mappings: composed.mappings,
+  };
+}
+
+function composeMappingsJs(
+  consumers: ReadonlyArray<IConsumer>,
+): ComposedMappings {
   const sources: Array<string> = [];
   const names: Array<string> = [];
   const sourceIndices: Map<string, number> = new Map();
@@ -215,42 +346,7 @@ export default function composeSourceMaps(
     }
   }
 
-  const composedMap: {
-    version: number,
-    sources: Array<string>,
-    names: Array<string>,
-    mappings: string,
-    file?: string,
-    sourcesContent?: Array<?string>,
-    x_facebook_sources?: FBSourcesArray,
-    x_hermes_function_offsets?: HermesFunctionOffsets,
-    x_google_ignoreList?: Array<number>,
-  } = {version: 3, sources, names, mappings: builder.toString()};
-  const {file} = consumers[0];
-  if (file != null) {
-    composedMap.file = file;
-  }
-
-  composedMap.sourcesContent = composedMap.sources.map(source =>
-    consumers[consumers.length - 1].sourceContentFor(source, true),
-  );
-  if (composedMap.sourcesContent.every(content => content == null)) {
-    delete composedMap.sourcesContent;
-  }
-  const metadataConsumer = new SourceMetadataMapConsumer(firstMap);
-  composedMap.x_facebook_sources = metadataConsumer.toArray(
-    composedMap.sources,
-  );
-  const function_offsets = maps[maps.length - 1].x_hermes_function_offsets;
-  if (function_offsets) {
-    composedMap.x_hermes_function_offsets = function_offsets;
-  }
-  const ignoreListConsumer = new GoogleIgnoreListConsumer(firstMap);
-  const x_google_ignoreList = ignoreListConsumer.toArray(composedMap.sources);
-  if (x_google_ignoreList.length) {
-    composedMap.x_google_ignoreList = x_google_ignoreList;
-  }
-  return composedMap;
+  return {sources, names, mappings: builder.toString()};
 }
 
 function compareStrings(a: ?string, b: ?string): number {

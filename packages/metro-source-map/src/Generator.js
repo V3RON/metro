@@ -69,6 +69,36 @@ export default class Generator {
   }
 
   /**
+   * Continues from mappings that the Rust implementation encoded: `mappings`
+   * (ASCII), the `names` in order of first use, and its `state` (see
+   * `SourceMapEncoder.finish` in metro-rs). The sources, their contents and
+   * metadata are added with `startFile`, as always.
+   */
+  restoreFromRust(
+    mappings: Buffer,
+    names: ReadonlyArray<string>,
+    state: Int32Array,
+  ): void {
+    if (mappings.length > 0) {
+      this.builder.buffer = mappings;
+      this.builder.pos = mappings.length;
+    }
+    this.builder.hasSegment = state[6] === 1;
+    this.last = {
+      generatedColumn: state[0],
+      generatedLine: state[1],
+      name: state[2],
+      source: state[3],
+      sourceColumn: state[4],
+      sourceLine: state[5],
+    };
+    for (let i = 0; i < names.length; i++) {
+      this.names.map.set(names[i], i);
+    }
+    this.names.nextIndex = names.length;
+  }
+
+  /**
    * Mark the beginning of a new source file.
    */
   startFile(

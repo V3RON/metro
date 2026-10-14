@@ -14,13 +14,23 @@ import type {
   GeneratedOffset,
   GeneratedPositionLookup,
   IConsumer,
+  IterationOrder,
   Mapping,
   SourcePosition,
 } from './types';
 
+import {getSourceMapBinding} from '../rust';
 import AbstractConsumer from './AbstractConsumer';
-import {EMPTY_POSITION, FIRST_COLUMN, FIRST_LINE} from './constants';
+import {
+  EMPTY_POSITION,
+  FIRST_COLUMN,
+  FIRST_LINE,
+  GENERATED_ORDER,
+  iterationOrderToString,
+} from './constants';
 import createConsumer from './createConsumer';
+import MappingsConsumer from './MappingsConsumer';
+import invariant from 'invariant';
 import {subtractOffsetFromPosition} from './positionMath';
 import {greatestLowerBound} from './search';
 import {add, add0, get0, get1, sub, sub1} from 'ob1';
@@ -58,6 +68,63 @@ export default class SectionsConsumer
     return consumer.originalPositionFor(
       subtractOffsetFromPosition(generatedPosition, generatedOffset),
     );
+  }
+
+  eachMapping(
+    callback: (mapping: Mapping) => unknown,
+    context?: unknown = null,
+    order?: IterationOrder = GENERATED_ORDER,
+  ): void {
+    if (getSourceMapBinding() == null) {
+      super.eachMapping(callback, context, order);
+      return;
+    }
+    // With Rust decoding the mappings of each section, hand them out straight
+    // from its columns instead of through the generator below, which builds a
+    // second object for every mapping.
+    invariant(
+      order === GENERATED_ORDER,
+      `Iteration order not implemented: ${iterationOrderToString(order)}`,
+    );
+    for (const [generatedOffset, consumer] of this._consumers) {
+      if (
+        consumer instanceof MappingsConsumer &&
+        consumer.eachMappingFromColumns(
+          callback,
+          context,
+          get0(generatedOffset.lines),
+          get0(generatedOffset.columns),
+          true,
+        )
+      ) {
+        continue;
+      }
+      let first = true;
+      for (const mapping of consumer.generatedMappings()) {
+        if (
+          first &&
+          (get1(mapping.generatedLine) > 1 || get0(mapping.generatedColumn) > 0)
+        ) {
+          callback.call(context, {
+            generatedLine: add(FIRST_LINE, generatedOffset.lines),
+            generatedColumn: add(FIRST_COLUMN, generatedOffset.columns),
+            source: null,
+            name: null,
+            originalLine: null,
+            originalColumn: null,
+          });
+        }
+        first = false;
+        callback.call(context, {
+          ...mapping,
+          generatedLine: add(mapping.generatedLine, generatedOffset.lines),
+          generatedColumn:
+            mapping.generatedLine === FIRST_LINE
+              ? add(mapping.generatedColumn, generatedOffset.columns)
+              : mapping.generatedColumn,
+        });
+      }
+    }
   }
 
   *generatedMappings(): Iterable<Mapping> {
