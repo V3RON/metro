@@ -1,0 +1,13 @@
+[package]
+name = "metro-rs-source-map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Source map encoding, decoding and composition (port of metro-source-map), without Node bindings."
+
+[dependencies]
+metro-rs-ob1 = { path = "../ob1" }
+
+[dev-dependencies]
+serde_json = "1"

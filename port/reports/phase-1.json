@@ -1,0 +1,709 @@
+{
+  "result": {
+    "phase": 1,
+    "title": "Pure leaf libraries",
+    "metroRust": "ob1,source-map,cache-key,core",
+    "quick": false,
+    "passed": true,
+    "seconds": 951,
+    "gates": [
+      {
+        "gate": "compile",
+        "status": "pass",
+        "step": ""
+      },
+      {
+        "gate": "tests",
+        "status": "pass",
+        "step": ""
+      },
+      {
+        "gate": "perf",
+        "status": "pass",
+        "step": ""
+      }
+    ]
+  },
+  "perf": {
+    "phase": 1,
+    "title": "Pure leaf libraries",
+    "date": "2026-10-14T10:10:33.691Z",
+    "quick": false,
+    "passed": true,
+    "baseline": {
+      "ref": "c3d0455a69412db39900fd66db74683f4741c196",
+      "metroRust": "off"
+    },
+    "candidate": {
+      "commit": "f845c8ea0fc6b3d99ba2fc24e2546db8797c274d",
+      "dirty": false,
+      "metroRust": "ob1,source-map,cache-key,core"
+    },
+    "machine": {
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "cores": 4,
+      "memGB": 16,
+      "os": "Linux 6.18.44-fc-v114",
+      "node": "v22.22.0"
+    },
+    "rows": [
+      {
+        "scenario": "cold-build",
+        "baselineMs": 43617,
+        "candidateMs": 43703,
+        "speedup": 1,
+        "noisePct": 3.8,
+        "baselineRssMB": 400.5,
+        "candidateRssMB": 390.5,
+        "runs": 4,
+        "status": "ok",
+        "note": "",
+        "extra": {
+          "baseline": [
+            {
+              "ms": 43366.3,
+              "mainCpuMs": 8898,
+              "peakRssMB": 400,
+              "modules": 2741,
+              "wallMs": 45022
+            },
+            {
+              "ms": 44313.7,
+              "mainCpuMs": 8330,
+              "peakRssMB": 401,
+              "modules": 2741,
+              "wallMs": 45900
+            },
+            {
+              "ms": 43868.3,
+              "mainCpuMs": 9247,
+              "peakRssMB": 400,
+              "modules": 2741,
+              "wallMs": 45537
+            },
+            {
+              "ms": 40986.5,
+              "mainCpuMs": 8332,
+              "peakRssMB": 404,
+              "modules": 2741,
+              "wallMs": 42597
+            }
+          ],
+          "candidate": [
+            {
+              "ms": 43607,
+              "mainCpuMs": 7893,
+              "peakRssMB": 393,
+              "modules": 2741,
+              "wallMs": 44963
+            },
+            {
+              "ms": 43798.2,
+              "mainCpuMs": 8415,
+              "peakRssMB": 390,
+              "modules": 2741,
+              "wallMs": 44944
+            },
+            {
+              "ms": 42274.4,
+              "mainCpuMs": 7720,
+              "peakRssMB": 391,
+              "modules": 2741,
+              "wallMs": 43726
+            },
+            {
+              "ms": 44853.3,
+              "mainCpuMs": 8966,
+              "peakRssMB": 390,
+              "modules": 2741,
+              "wallMs": 46094
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "cold-filemap",
+        "baselineMs": 3347,
+        "candidateMs": 3531,
+        "speedup": 0.95,
+        "noisePct": 10.9,
+        "baselineRssMB": 395,
+        "candidateRssMB": 391,
+        "runs": 5,
+        "status": "ok",
+        "note": "",
+        "extra": {
+          "baseline": [
+            {
+              "ms": 2974.2,
+              "mainCpuMs": 5229,
+              "peakRssMB": 397,
+              "modules": 2741,
+              "wallMs": 4452
+            },
+            {
+              "ms": 3707,
+              "mainCpuMs": 6136,
+              "peakRssMB": 395,
+              "modules": 2741,
+              "wallMs": 5194
+            },
+            {
+              "ms": 3695.1,
+              "mainCpuMs": 6012,
+              "peakRssMB": 391,
+              "modules": 2741,
+              "wallMs": 5221
+            },
+            {
+              "ms": 3346.9,
+              "mainCpuMs": 5975,
+              "peakRssMB": 396,
+              "modules": 2741,
+              "wallMs": 5135
+            },
+            {
+              "ms": 3187.5,
+              "mainCpuMs": 5504,
+              "peakRssMB": 388,
+              "modules": 2741,
+              "wallMs": 4689
+            }
+          ],
+          "candidate": [
+            {
+              "ms": 3042.3,
+              "mainCpuMs": 5002,
+              "peakRssMB": 391,
+              "modules": 2741,
+              "wallMs": 4203
+            },
+            {
+              "ms": 2959.4,
+              "mainCpuMs": 5112,
+              "peakRssMB": 391,
+              "modules": 2741,
+              "wallMs": 4282
+            },
+            {
+              "ms": 3531.1,
+              "mainCpuMs": 5935,
+              "peakRssMB": 398,
+              "modules": 2741,
+              "wallMs": 4928
+            },
+            {
+              "ms": 3697,
+              "mainCpuMs": 5865,
+              "peakRssMB": 387,
+              "modules": 2741,
+              "wallMs": 5008
+            },
+            {
+              "ms": 3538.5,
+              "mainCpuMs": 5436,
+              "peakRssMB": 390,
+              "modules": 2741,
+              "wallMs": 4658
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "warm-build",
+        "baselineMs": 3170,
+        "candidateMs": 2998,
+        "speedup": 1.06,
+        "noisePct": 7,
+        "baselineRssMB": 398,
+        "candidateRssMB": 391,
+        "runs": 5,
+        "status": "ok",
+        "note": "",
+        "extra": {
+          "baseline": [
+            {
+              "ms": 3019.2,
+              "mainCpuMs": 5321,
+              "peakRssMB": 399,
+              "modules": 2741,
+              "wallMs": 4536
+            },
+            {
+              "ms": 3117.6,
+              "mainCpuMs": 5329,
+              "peakRssMB": 393,
+              "modules": 2741,
+              "wallMs": 4593
+            },
+            {
+              "ms": 3183.4,
+              "mainCpuMs": 5462,
+              "peakRssMB": 385,
+              "modules": 2741,
+              "wallMs": 4621
+            },
+            {
+              "ms": 3170.3,
+              "mainCpuMs": 5759,
+              "peakRssMB": 398,
+              "modules": 2741,
+              "wallMs": 4769
+            },
+            {
+              "ms": 3401.7,
+              "mainCpuMs": 5787,
+              "peakRssMB": 400,
+              "modules": 2741,
+              "wallMs": 4894
+            }
+          ],
+          "candidate": [
+            {
+              "ms": 2990,
+              "mainCpuMs": 4897,
+              "peakRssMB": 392,
+              "modules": 2741,
+              "wallMs": 4144
+            },
+            {
+              "ms": 2924.5,
+              "mainCpuMs": 4663,
+              "peakRssMB": 386,
+              "modules": 2741,
+              "wallMs": 4019
+            },
+            {
+              "ms": 3266.4,
+              "mainCpuMs": 5285,
+              "peakRssMB": 391,
+              "modules": 2741,
+              "wallMs": 4498
+            },
+            {
+              "ms": 3342.8,
+              "mainCpuMs": 5241,
+              "peakRssMB": 391,
+              "modules": 2741,
+              "wallMs": 4500
+            },
+            {
+              "ms": 2998,
+              "mainCpuMs": 4958,
+              "peakRssMB": 393,
+              "modules": 2741,
+              "wallMs": 4212
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "edit",
+        "baselineMs": 283,
+        "candidateMs": 275,
+        "speedup": 1.03,
+        "noisePct": 7.2,
+        "baselineRssMB": 768,
+        "candidateRssMB": 729,
+        "runs": 5,
+        "status": "ok",
+        "note": "",
+        "extra": {
+          "baseline": [
+            {
+              "ms": 281.9,
+              "mainCpuMs": 9119,
+              "peakRssMB": 659,
+              "initialMs": 3967,
+              "firstEditMs": 2928,
+              "editsMs": [
+                2928,
+                301,
+                282,
+                255,
+                293,
+                274
+              ],
+              "wallMs": 12884
+            },
+            {
+              "ms": 285.8,
+              "mainCpuMs": 9829,
+              "peakRssMB": 761,
+              "initialMs": 4637,
+              "firstEditMs": 2979,
+              "editsMs": [
+                2979,
+                276,
+                286,
+                322,
+                291,
+                255
+              ],
+              "wallMs": 13636
+            },
+            {
+              "ms": 298.6,
+              "mainCpuMs": 9861,
+              "peakRssMB": 768,
+              "initialMs": 4652,
+              "firstEditMs": 3058,
+              "editsMs": [
+                3058,
+                315,
+                299,
+                285,
+                305,
+                259
+              ],
+              "wallMs": 13784
+            },
+            {
+              "ms": 257.7,
+              "mainCpuMs": 9476,
+              "peakRssMB": 770,
+              "initialMs": 4373,
+              "firstEditMs": 3218,
+              "editsMs": [
+                3218,
+                294,
+                283,
+                255,
+                258,
+                242
+              ],
+              "wallMs": 13516
+            },
+            {
+              "ms": 282.6,
+              "mainCpuMs": 9494,
+              "peakRssMB": 852,
+              "initialMs": 4357,
+              "firstEditMs": 3195,
+              "editsMs": [
+                3195,
+                304,
+                283,
+                269,
+                327,
+                233
+              ],
+              "wallMs": 13599
+            }
+          ],
+          "candidate": [
+            {
+              "ms": 296.6,
+              "mainCpuMs": 9816,
+              "peakRssMB": 730,
+              "initialMs": 4525,
+              "firstEditMs": 3146,
+              "editsMs": [
+                3146,
+                292,
+                325,
+                281,
+                297,
+                301
+              ],
+              "wallMs": 13744
+            },
+            {
+              "ms": 262.3,
+              "mainCpuMs": 9245,
+              "peakRssMB": 712,
+              "initialMs": 4568,
+              "firstEditMs": 3010,
+              "editsMs": [
+                3010,
+                297,
+                325,
+                258,
+                247,
+                262
+              ],
+              "wallMs": 13268
+            },
+            {
+              "ms": 264.4,
+              "mainCpuMs": 9695,
+              "peakRssMB": 725,
+              "initialMs": 4756,
+              "firstEditMs": 3276,
+              "editsMs": [
+                3276,
+                293,
+                331,
+                244,
+                264,
+                251
+              ],
+              "wallMs": 13927
+            },
+            {
+              "ms": 275.4,
+              "mainCpuMs": 9314,
+              "peakRssMB": 732,
+              "initialMs": 4497,
+              "firstEditMs": 2969,
+              "editsMs": [
+                2969,
+                275,
+                321,
+                254,
+                305,
+                236
+              ],
+              "wallMs": 13158
+            },
+            {
+              "ms": 288.7,
+              "mainCpuMs": 9267,
+              "peakRssMB": 729,
+              "initialMs": 4606,
+              "firstEditMs": 2918,
+              "editsMs": [
+                2918,
+                301,
+                289,
+                256,
+                241,
+                290
+              ],
+              "wallMs": 13099
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "micro:file-map",
+        "baselineMs": 2099,
+        "candidateMs": 1878,
+        "speedup": 1.12,
+        "noisePct": 10.7,
+        "baselineRssMB": 331,
+        "candidateRssMB": 288,
+        "runs": 5,
+        "status": "ok",
+        "note": "",
+        "extra": {
+          "baseline": [
+            {
+              "ms": 2355.9,
+              "mainCpuMs": 5927,
+              "peakRssMB": 333,
+              "files": 23836,
+              "wallMs": 3212
+            },
+            {
+              "ms": 2099.3,
+              "mainCpuMs": 5419,
+              "peakRssMB": 331,
+              "files": 23836,
+              "wallMs": 2865
+            },
+            {
+              "ms": 1906.5,
+              "mainCpuMs": 5117,
+              "peakRssMB": 327,
+              "files": 23836,
+              "wallMs": 2636
+            },
+            {
+              "ms": 2106.7,
+              "mainCpuMs": 5385,
+              "peakRssMB": 330,
+              "files": 23836,
+              "wallMs": 2894
+            },
+            {
+              "ms": 2069.4,
+              "mainCpuMs": 5492,
+              "peakRssMB": 336,
+              "files": 23836,
+              "wallMs": 2914
+            }
+          ],
+          "candidate": [
+            {
+              "ms": 1900.8,
+              "mainCpuMs": 4961,
+              "peakRssMB": 330,
+              "files": 23836,
+              "wallMs": 2519
+            },
+            {
+              "ms": 1847.9,
+              "mainCpuMs": 4845,
+              "peakRssMB": 289,
+              "files": 23836,
+              "wallMs": 2495
+            },
+            {
+              "ms": 1878.3,
+              "mainCpuMs": 4816,
+              "peakRssMB": 287,
+              "files": 23836,
+              "wallMs": 2479
+            },
+            {
+              "ms": 1823.2,
+              "mainCpuMs": 4681,
+              "peakRssMB": 287,
+              "files": 23836,
+              "wallMs": 2378
+            },
+            {
+              "ms": 1967.3,
+              "mainCpuMs": 5127,
+              "peakRssMB": 288,
+              "files": 23836,
+              "wallMs": 2555
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "micro:source-map",
+        "baselineMs": 1366,
+        "candidateMs": 605,
+        "speedup": 2.26,
+        "noisePct": 7.3,
+        "baselineRssMB": 686,
+        "candidateRssMB": 575,
+        "runs": 5,
+        "status": "ok",
+        "note": "target 2x",
+        "extra": {
+          "baseline": [
+            {
+              "ms": 1379.3,
+              "mainCpuMs": 3084,
+              "peakRssMB": 686,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 2284
+            },
+            {
+              "ms": 1366.1,
+              "mainCpuMs": 3099,
+              "peakRssMB": 687,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 2225
+            },
+            {
+              "ms": 1254.1,
+              "mainCpuMs": 2956,
+              "peakRssMB": 687,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 2071
+            },
+            {
+              "ms": 1364.5,
+              "mainCpuMs": 3121,
+              "peakRssMB": 686,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 2404
+            },
+            {
+              "ms": 1440.2,
+              "mainCpuMs": 3146,
+              "peakRssMB": 686,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 2284
+            }
+          ],
+          "candidate": [
+            {
+              "ms": 658.1,
+              "mainCpuMs": 1853,
+              "peakRssMB": 576,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 1673
+            },
+            {
+              "ms": 676.7,
+              "mainCpuMs": 1837,
+              "peakRssMB": 574,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 1542
+            },
+            {
+              "ms": 600.8,
+              "mainCpuMs": 1789,
+              "peakRssMB": 568,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 1506
+            },
+            {
+              "ms": 605,
+              "mainCpuMs": 1671,
+              "peakRssMB": 575,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 1586
+            },
+            {
+              "ms": 588.3,
+              "mainCpuMs": 1630,
+              "peakRssMB": 575,
+              "sources": 2738,
+              "outKB": 10419,
+              "wallMs": 1373
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "diff": {
+    "phase": 1,
+    "metroRust": "ob1,source-map,cache-key,core",
+    "passed": true,
+    "results": [
+      {
+        "file": "TestBundle.js",
+        "same": true,
+        "bytes": 123621,
+        "detail": ""
+      },
+      {
+        "file": "TestBundle.map",
+        "same": true,
+        "bytes": 70602,
+        "detail": ""
+      },
+      {
+        "file": "bench.dev.js",
+        "same": true,
+        "bytes": 16030951,
+        "detail": ""
+      },
+      {
+        "file": "bench.dev.map",
+        "same": true,
+        "bytes": 25628693,
+        "detail": ""
+      },
+      {
+        "file": "bench.prod.js",
+        "same": true,
+        "bytes": 12322141,
+        "detail": ""
+      },
+      {
+        "file": "bench.prod.map",
+        "same": true,
+        "bytes": 20757125,
+        "detail": ""
+      }
+    ]
+  }
+}

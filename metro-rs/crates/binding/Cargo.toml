@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 metro-rs-core = { path = "../core" }
+metro-rs-source-map = { path = "../source-map" }
+metro-rs-cache-key = { path = "../cache-key" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 

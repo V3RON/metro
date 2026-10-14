@@ -1,0 +1,10 @@
+[package]
+name = "metro-rs-cache-key"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Cache keys from file contents (port of metro-cache-key)."
+
+[dependencies]
+md-5 = "0.10"
