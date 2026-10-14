@@ -79,52 +79,82 @@ fn bincode_options() -> impl bincode::Options {
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The content of a cache file: plain data, so that reading and writing it can
+/// run on a worker thread. See [`FileMap::cache_snapshot`] and
+/// [`FileMap::from_cache`].
+pub struct CacheData(CacheFile);
+
+/// Writes a snapshot to `path` atomically.
+pub fn write_cache_file(path: &Path, data: &CacheData) -> Result<(), FileMapError> {
+    write_file(path, &data.0)
+}
+
+/// Reads and decodes a cache file. Any failure (missing file, other format
+/// version, corruption) is `None`.
+pub fn read_cache_file(path: &Path) -> Option<CacheData> {
+    let file_handle = fs::File::open(path).ok()?;
+    let len = file_handle.metadata().ok()?.len();
+    let mut reader = BufReader::new(file_handle);
+    let mut magic = [0u8; 8];
+    std::io::Read::read_exact(&mut reader, &mut magic).ok()?;
+    if magic != MAGIC {
+        return None;
+    }
+    // The limit keeps a corrupt length prefix from allocating more than
+    // the file could hold.
+    let file: CacheFile = bincode_options()
+        .with_limit(len)
+        .deserialize_from(reader)
+        .ok()?;
+    (file.format_version == FORMAT_VERSION).then_some(CacheData(file))
+}
+
 impl FileMap {
-    /// Writes the cache atomically: a temporary file in the same directory,
-    /// then a rename over `path`.
-    pub fn write_cache(&self, path: &Path, extras: &CacheExtras) -> Result<(), FileMapError> {
+    /// The data of [`FileMap::write_cache`], taken now.
+    pub fn cache_snapshot(&self, extras: &CacheExtras) -> CacheData {
         let files: Vec<(String, FileMetadata)> = self
             .metadata_iterator(true, true)
             .into_iter()
             .filter_map(|e| self.metadata(e.id).map(|m| (e.canonical_path, m.clone())))
             .collect();
-        let file = CacheFile {
+        CacheData(CacheFile {
             format_version: FORMAT_VERSION,
             root_dir: self.root_dir().to_string(),
             extras: extras.clone(),
             files,
-        };
+        })
+    }
 
-        write_file(path, &file)
+    /// Builds a file map from [`read_cache_file`]'s data. `None` for another
+    /// root.
+    pub fn from_cache(
+        data: CacheData,
+        root_dir: &str,
+        config: FileMapConfig,
+    ) -> Option<(FileMap, CacheExtras)> {
+        let file = data.0;
+        if file.root_dir != root_dir {
+            return None;
+        }
+        let mut map = FileMap::new(root_dir, config);
+        map.load(file.files).ok()?;
+        Some((map, file.extras))
+    }
+
+    /// Writes the cache atomically: a temporary file in the same directory,
+    /// then a rename over `path`.
+    pub fn write_cache(&self, path: &Path, extras: &CacheExtras) -> Result<(), FileMapError> {
+        write_cache_file(path, &self.cache_snapshot(extras))
     }
 
     /// Reads a cache written by [`FileMap::write_cache`] for `root_dir`. Any
-    /// failure (missing file, other format version, other root, corruption)
+    /// failure (missing file, other format version or root, corruption)
     /// is `None`: the caller does a full crawl.
     pub fn read_cache(
         path: &Path,
         root_dir: &str,
         config: FileMapConfig,
     ) -> Option<(FileMap, CacheExtras)> {
-        let file_handle = fs::File::open(path).ok()?;
-        let len = file_handle.metadata().ok()?.len();
-        let mut reader = BufReader::new(file_handle);
-        let mut magic = [0u8; 8];
-        std::io::Read::read_exact(&mut reader, &mut magic).ok()?;
-        if magic != MAGIC {
-            return None;
-        }
-        // The limit keeps a corrupt length prefix from allocating more than
-        // the file could hold.
-        let file: CacheFile = bincode_options()
-            .with_limit(len)
-            .deserialize_from(reader)
-            .ok()?;
-        if file.format_version != FORMAT_VERSION || file.root_dir != root_dir {
-            return None;
-        }
-        let mut map = FileMap::new(root_dir, config);
-        map.load(file.files).ok()?;
-        Some((map, file.extras))
+        FileMap::from_cache(read_cache_file(path)?, root_dir, config)
     }
 }

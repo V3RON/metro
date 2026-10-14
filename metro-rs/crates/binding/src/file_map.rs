@@ -13,18 +13,20 @@
 //! `Error` objects with that `code`, so that the JS can tell them apart.
 
 use metro_rs_file_map::{
-    find, CacheExtras, Changes, CrawlOptions, DeltaSession, Difference, FileData, FileMap,
+    find, read_cache_file, write_cache_file, CacheData, CacheExtras, Changes, CrawlOptions,
+    CrawlOutput, DeltaIo, DeltaIoResult, DeltaSession, Difference, FileData, FileMap,
     FileMapConfig, FileMapError, FileMetadata, IgnoreRules, JsRegExp, MapLookup, MatchFilesOptions,
-    PluginFilter, PluginJobResult, Sha1Job, Symlink, TouchInput, WatchEvent,
+    PluginFilter, PluginJobResult, PreparedDelta, Sha1Job, Symlink, TouchInput, WatchEvent,
 };
 use metro_rs_haste::{HasteDelta, HasteError, HasteMap, HasteOptions, ModuleType};
-use napi::bindgen_prelude::{AsyncTask, Buffer, Float64Array, Uint32Array, Uint8Array};
+use napi::bindgen_prelude::{AsyncTask, Buffer, External, Float64Array, Uint32Array, Uint8Array};
 use napi::{Env, JsFunction, JsObject, JsUnknown, Result, Status, Task};
 use napi_derive::napi;
 use serde_json::Value;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 // ------------------------------------------------------------------- errors
 
@@ -96,6 +98,8 @@ struct State {
     /// Keep what the node crawler found (for METRO_RUST_VERIFY).
     keep_crawl_input: bool,
     crawl_input: Option<FileData>,
+    /// A delta waiting for its file I/O.
+    prepared: Option<PreparedDelta>,
     /// A delta waiting for its plugin data.
     session: Option<DeltaSession>,
     /// The view of the last change that was applied (`changeView`).
@@ -643,6 +647,7 @@ impl NativeFileMap {
                 pending: None,
                 keep_crawl_input: options.keep_crawl_input,
                 crawl_input: None,
+                prepared: None,
                 session: None,
                 last_changes: Changes::default(),
                 touches: HashMap::new(),
@@ -653,14 +658,25 @@ impl NativeFileMap {
 
     // ---------------------------------------------------------------- cache
 
-    /// Loads the cache file. `null` for a miss (no file, another format
-    /// version or root, corruption): the caller crawls everything.
+    /// Reads and decodes the cache file on a worker thread. The promise gives
+    /// `null` for a miss (no file, another format version, corruption), else
+    /// a handle for `loadCache`.
     #[napi]
-    pub fn read_cache(&self, path: String) -> Result<Option<CacheExtrasJs>> {
+    pub fn read_cache_file(&self, path: String) -> AsyncTask<ReadCacheTask> {
+        AsyncTask::new(ReadCacheTask { path })
+    }
+
+    /// Replaces the contents with a cache read by `readCacheFile`. `null` for
+    /// a miss (another root): the caller crawls everything.
+    #[napi]
+    pub fn load_cache(&self, data: Handoff<CacheData>) -> Result<Option<CacheExtrasJs>> {
+        let Some(data) = take_handoff(&data) else {
+            return Err(napi::Error::from_reason("metro-rs: the cache was used"));
+        };
         let mut state = self.write()?;
         let root_dir = state.map.root_dir().to_string();
         let config = state.map.config().clone();
-        let Some((map, extras)) = FileMap::read_cache(Path::new(&path), &root_dir, config) else {
+        let Some((map, extras)) = FileMap::from_cache(data, &root_dir, config) else {
             return Ok(None);
         };
         state.map = map;
@@ -672,9 +688,9 @@ impl NativeFileMap {
         }))
     }
 
-    /// Writes the cache file (atomically).
+    /// The data of the cache file, taken now, for `writeCacheFile`.
     #[napi]
-    pub fn write_cache(&self, env: Env, path: String, extras: CacheExtrasJs) -> Result<()> {
+    pub fn snapshot_cache(&self, extras: CacheExtrasJs) -> Result<Handoff<CacheData>> {
         let state = self.read()?;
         let extras = CacheExtras {
             clocks: extras
@@ -688,36 +704,54 @@ impl NativeFileMap {
                 .zip(extras.plugin_states)
                 .collect(),
         };
-        state
-            .map
-            .write_cache(Path::new(&path), &extras)
-            .map_err(|e| file_map_error(&env, &e))
+        Ok(handoff(state.map.cache_snapshot(&extras)))
+    }
+
+    /// Writes a snapshot (atomically) on a worker thread.
+    #[napi]
+    pub fn write_cache_file(
+        &self,
+        path: String,
+        data: Handoff<CacheData>,
+    ) -> Result<AsyncTask<WriteCacheTask>> {
+        let Some(data) = take_handoff(&data) else {
+            return Err(napi::Error::from_reason("metro-rs: the cache was used"));
+        };
+        Ok(AsyncTask::new(WriteCacheTask { path, data }))
     }
 
     // ---------------------------------------------------------------- build
 
-    /// `nodeCrawl`: walks `roots` and keeps the difference to the current
-    /// state (`subpath`: only below this normal directory) for `beginDelta`.
+    /// `nodeCrawl`, first half: walks `roots` on a worker thread. The promise
+    /// gives a handle for `finishCrawl`.
     #[napi]
-    pub fn node_crawl(
+    pub fn crawl_find(&self, roots: Vec<String>) -> Result<AsyncTask<CrawlTask>> {
+        let state = self.read()?;
+        Ok(AsyncTask::new(CrawlTask {
+            extensions: state.extensions.clone(),
+            ignore_pattern: state.ignore_pattern.clone(),
+            retain_all_files: state.retain_all_files,
+            health_check_file_prefix: state.health_check_file_prefix.clone(),
+            include_symlinks: state.include_symlinks,
+            root_dir: state.map.root_dir().to_string(),
+            roots,
+        }))
+    }
+
+    /// `nodeCrawl`, second half: keeps the difference between what the crawl
+    /// found and the current state (`subpath`: only below this normal
+    /// directory) for `prepareDelta`.
+    #[napi]
+    pub fn finish_crawl(
         &self,
         env: Env,
-        roots: Vec<String>,
+        found: Handoff<CrawlOutput>,
         subpath: Option<String>,
     ) -> Result<CrawlSummary> {
+        let Some(found) = take_handoff(&found) else {
+            return Err(napi::Error::from_reason("metro-rs: the crawl was used"));
+        };
         let mut state = self.write()?;
-        let root_dir = state.map.root_dir().to_string();
-        let found = find(&CrawlOptions {
-            extensions: &state.extensions,
-            ignore: IgnoreRules {
-                ignore_pattern: &state.ignore_pattern,
-                retain_all_files: state.retain_all_files,
-                health_check_file_prefix: Some(&state.health_check_file_prefix),
-            },
-            include_symlinks: state.include_symlinks,
-            root_dir: &root_dir,
-            roots: &roots,
-        });
         let difference = state
             .map
             .get_difference(&found.file_data, subpath.as_deref())
@@ -794,20 +828,50 @@ impl NativeFileMap {
         Ok(result)
     }
 
-    /// First half of `applyFileDelta` for the kept difference: removes, hashes
-    /// and reads links. Returns the files that need plugin workers.
+    /// First part of `applyFileDelta` for the kept difference: removes the
+    /// removed files and decides what to hash. The I/O is `deltaIo`.
     #[napi]
-    pub fn begin_delta(&self, env: Env) -> Result<DeltaJobs> {
+    pub fn prepare_delta(&self, env: Env) -> Result<()> {
         let mut state = self.write()?;
         let Some(difference) = state.pending.take() else {
             return Err(napi::Error::from_reason(
                 "metro-rs: there is no crawl result to apply",
             ));
         };
-        let session = state
+        let prepared = state
             .map
-            .begin_delta(difference)
+            .prepare_delta(difference)
             .map_err(|e| file_map_error(&env, &e))?;
+        state.prepared = Some(prepared);
+        Ok(())
+    }
+
+    /// Hashes the files and reads the links of the prepared delta, on worker
+    /// threads. The promise gives a handle for `beginDelta`.
+    #[napi]
+    pub fn delta_io(&self) -> Result<AsyncTask<DeltaIoTask>> {
+        let mut state = self.write()?;
+        let Some(prepared) = state.prepared.as_mut() else {
+            return Err(napi::Error::from_reason(
+                "metro-rs: there is no delta to hash",
+            ));
+        };
+        Ok(AsyncTask::new(DeltaIoTask {
+            io: Some(prepared.take_io()),
+        }))
+    }
+
+    /// Last part of the first half of `applyFileDelta`. Returns the files that
+    /// need plugin workers.
+    #[napi]
+    pub fn begin_delta(&self, io: Handoff<DeltaIoResult>) -> Result<DeltaJobs> {
+        let mut state = self.write()?;
+        let (Some(prepared), Some(io)) = (state.prepared.take(), take_handoff(&io)) else {
+            return Err(napi::Error::from_reason(
+                "metro-rs: there is no prepared delta",
+            ));
+        };
+        let session = state.map.complete_delta(prepared, io);
         let jobs = session.plugin_jobs();
         let result = DeltaJobs {
             paths: jobs.iter().map(|j| j.normal_path.clone()).collect(),
@@ -1435,5 +1499,109 @@ impl Task for Sha1Task {
             }
         }
         Ok(object.into_unknown())
+    }
+}
+
+// ----------------------------------------------------- work on other threads
+
+/// A value that one async call produces and a later sync call consumes: it
+/// stays in Rust, in a JS handle.
+pub type Handoff<T> = External<Mutex<Option<T>>>;
+
+fn handoff<T>(value: T) -> Handoff<T> {
+    External::new(Mutex::new(Some(value)))
+}
+
+fn take_handoff<T>(handle: &Handoff<T>) -> Option<T> {
+    handle.lock().ok()?.take()
+}
+
+/// `find`, off the main thread: a pure function over the file system.
+pub struct CrawlTask {
+    extensions: Vec<String>,
+    ignore_pattern: JsRegExp,
+    retain_all_files: bool,
+    health_check_file_prefix: String,
+    include_symlinks: bool,
+    root_dir: String,
+    roots: Vec<String>,
+}
+
+impl Task for CrawlTask {
+    type Output = CrawlOutput;
+    type JsValue = Handoff<CrawlOutput>;
+
+    fn compute(&mut self) -> Result<CrawlOutput> {
+        Ok(find(&CrawlOptions {
+            extensions: &self.extensions,
+            ignore: IgnoreRules {
+                ignore_pattern: &self.ignore_pattern,
+                retain_all_files: self.retain_all_files,
+                health_check_file_prefix: Some(&self.health_check_file_prefix),
+            },
+            include_symlinks: self.include_symlinks,
+            root_dir: &self.root_dir,
+            roots: &self.roots,
+        }))
+    }
+
+    fn resolve(&mut self, _env: Env, output: CrawlOutput) -> Result<Self::JsValue> {
+        Ok(handoff(output))
+    }
+}
+
+/// Hashing and reading links for a delta, off the main thread.
+pub struct DeltaIoTask {
+    io: Option<DeltaIo>,
+}
+
+impl Task for DeltaIoTask {
+    type Output = DeltaIoResult;
+    type JsValue = Handoff<DeltaIoResult>;
+
+    fn compute(&mut self) -> Result<DeltaIoResult> {
+        Ok(self.io.take().unwrap_or_default().run())
+    }
+
+    fn resolve(&mut self, _env: Env, output: DeltaIoResult) -> Result<Self::JsValue> {
+        Ok(handoff(output))
+    }
+}
+
+/// Reading and decoding the cache file, off the main thread.
+pub struct ReadCacheTask {
+    path: String,
+}
+
+impl Task for ReadCacheTask {
+    type Output = Option<CacheData>;
+    type JsValue = Option<Handoff<CacheData>>;
+
+    fn compute(&mut self) -> Result<Option<CacheData>> {
+        Ok(read_cache_file(Path::new(&self.path)))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Option<CacheData>) -> Result<Self::JsValue> {
+        Ok(output.map(handoff))
+    }
+}
+
+/// Serialising a cache snapshot and writing the file, off the main thread.
+pub struct WriteCacheTask {
+    path: String,
+    data: CacheData,
+}
+
+impl Task for WriteCacheTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<()> {
+        write_cache_file(Path::new(&self.path), &self.data)
+            .map_err(|e| napi::Error::from_reason(e.message))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: ()) -> Result<()> {
+        Ok(())
     }
 }

@@ -22,12 +22,12 @@ mod process;
 mod queries;
 
 pub use aggregator::{Changes, FileSystemChangeAggregator};
-pub use cache::{CacheExtras, FORMAT_VERSION};
+pub use cache::{read_cache_file, write_cache_file, CacheData, CacheExtras, FORMAT_VERSION};
 pub use crawl::{find, mtime_ms, mtime_ms_from_parts, CrawlOptions, CrawlOutput, IgnoreRules};
 pub use errors::FileMapError;
 pub use file_map::{
-    DeltaSession, Difference, FileMap, FileMapConfig, FileStats, MapLookup, MetadataEntry,
-    PluginJob, PluginJobResult, TouchInput, TouchOutput, WatchEvent,
+    DeltaIo, DeltaIoResult, DeltaSession, Difference, FileMap, FileMapConfig, FileStats, MapLookup,
+    MetadataEntry, PluginJob, PluginJobResult, PreparedDelta, TouchInput, TouchOutput, WatchEvent,
 };
 pub use js_map::{JsMap, JsSet};
 pub use js_regex::{JsRegExp, RegExpError};

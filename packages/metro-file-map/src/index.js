@@ -71,6 +71,7 @@ import EventEmitter from 'node:events';
 import {promises as fsPromises} from 'node:fs';
 import * as path from 'node:path';
 import {performance} from 'node:perf_hooks';
+import {setTimeout as sleep} from 'node:timers/promises';
 import {isRustEnabled, loadRustBinding} from 'metro-rust-switch';
 import nullthrows from 'nullthrows';
 
@@ -1174,9 +1175,13 @@ export default class FileMap extends EventEmitter {
     let cache = null;
     if (cacheManager instanceof DiskCacheManager) {
       try {
-        const extras = rust.native.readCache(
-          cacheManager.getCacheFilePath() + RUST_CACHE_SUFFIX,
+        // Read and decoded on a worker thread, then loaded.
+        const data = await settled(
+          rust.native.readCacheFile(
+            cacheManager.getCacheFilePath() + RUST_CACHE_SUFFIX,
+          ),
         );
+        const extras = data == null ? null : rust.native.loadCache(data);
         if (extras != null) {
           cache = {
             clocks: new Map<string, WatchmanClockSpec>(
@@ -1230,7 +1235,7 @@ export default class FileMap extends EventEmitter {
       resultClocks = result.clocks;
     } else {
       this.#startupPerfLogger?.point('crawl_start');
-      this.#crawlNodeRust(rust, this.#options.roots, null);
+      await this.#crawlNodeRust(rust, this.#options.roots, null);
       this.#startupPerfLogger?.point('crawl_end');
     }
     this.#startupPerfLogger?.point('buildFileDelta_end');
@@ -1241,16 +1246,19 @@ export default class FileMap extends EventEmitter {
    * `nodeCrawl`: the native file map keeps the difference for
    * `#applyFileDeltaRust`. Returns how many files changed and were removed.
    */
-  #crawlNodeRust(
+  async #crawlNodeRust(
     rust: RustMode,
     roots: ReadonlyArray<string>,
     subpath: ?string,
-  ): {changed: number, removed: number} {
+  ): Promise<{changed: number, removed: number}> {
     const signal = this.#crawlerAbortController.signal;
     signal.throwIfAborted();
     debug('Crawling roots: %s with %s crawler.', roots, 'node');
     this.#startupPerfLogger?.point('nodeCrawl_start');
-    const summary = rust.native.nodeCrawl(roots, subpath ?? null);
+    // The walk is on a worker thread, the difference to our state is here.
+    const found = await settled(rust.native.crawlFind(roots));
+    signal.throwIfAborted();
+    const summary = rust.native.finishCrawl(found, subpath ?? null);
     for (const warning of summary.warnings) {
       this.#console.warn(warning);
     }
@@ -1290,7 +1298,9 @@ export default class FileMap extends EventEmitter {
     const perf = this.#startupPerfLogger;
     perf?.point('applyFileDelta_start');
     perf?.point('applyFileDelta_preprocess_start');
-    const jobs = rust.native.beginDelta();
+    rust.native.prepareDelta();
+    // Hashing and reading links are on worker threads.
+    const jobs = rust.native.beginDelta(await settled(rust.native.deltaIo()));
     perf?.point('applyFileDelta_preprocess_end');
 
     debug('Found %d files for plugin workers.', jobs.paths.length);
@@ -1441,16 +1451,20 @@ export default class FileMap extends EventEmitter {
     if (cacheManager instanceof DiskCacheManager) {
       const cacheFile = cacheManager.getCacheFilePath() + RUST_CACHE_SUFFIX;
       await (cacheManager as Internal)._writeWith(
-        () => ({
-          clockPaths: Array.from(clocks.keys()),
-          clockSpecs: Array.from(clocks.values(), spec => JSON.stringify(spec)),
-          pluginNames: plugins.map(({plugin}) => plugin.name),
-          pluginStates: plugins.map(({plugin}) => {
-            const state = plugin.getSerializableSnapshot();
-            return state === undefined ? null : JSON.stringify(state);
+        () =>
+          rust.native.snapshotCache({
+            clockPaths: Array.from(clocks.keys()),
+            clockSpecs: Array.from(clocks.values(), spec =>
+              JSON.stringify(spec),
+            ),
+            pluginNames: plugins.map(({plugin}) => plugin.name),
+            pluginStates: plugins.map(({plugin}) => {
+              const state = plugin.getSerializableSnapshot();
+              return state === undefined ? null : JSON.stringify(state);
+            }),
           }),
-        }),
-        (extras: unknown) => rust.native.writeCache(cacheFile, extras),
+        (snapshot: unknown) =>
+          settled(rust.native.writeCacheFile(cacheFile, snapshot)),
         this.#getCacheWriteOptions(changedSinceCacheRead),
       );
     }
@@ -1770,7 +1784,7 @@ export default class FileMap extends EventEmitter {
 
             if (rust != null) {
               // Crawl the specific subdirectory, in Rust
-              const summary = this.#crawlNodeRust(
+              const summary = await this.#crawlNodeRust(
                 rust,
                 [path.join(this.#options.rootDir, subpath)],
                 subpath,
@@ -1957,6 +1971,18 @@ export default class FileMap extends EventEmitter {
   }
 
   static H: HType = H;
+}
+
+/**
+ * The result of a native async task, a timer turn of the event loop after it
+ * completes (a real timer, which fake timers don't touch): Node releases the task's async resource in a later turn, and
+ * whoever waits for the file map (to close a server, say) can then see that
+ * nothing of the file map is left behind.
+ */
+async function settled<T>(task: Promise<T>): Promise<T> {
+  const result = await task;
+  await sleep(0);
+  return result;
 }
 
 /** What the plugin workers returned, as the JSON text the native core stores. */

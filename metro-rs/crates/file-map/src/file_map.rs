@@ -146,6 +146,64 @@ pub struct PluginJobResult {
     pub outcome: Result<Vec<Option<String>>, FileMapError>,
 }
 
+/// A delta whose removals are applied and whose file I/O is still to do. See
+/// [`FileMap::prepare_delta`].
+pub struct PreparedDelta {
+    changed_files: FileData,
+    aggregator: FileSystemChangeAggregator,
+    plugin_jobs: Vec<PluginJob>,
+    processed: Vec<String>,
+    io: Option<DeltaIo>,
+}
+
+impl PreparedDelta {
+    /// The file I/O of the delta, which does not need the tree.
+    pub fn take_io(&mut self) -> DeltaIo {
+        self.io.take().unwrap_or_default()
+    }
+}
+
+/// Hashing and reading links for a delta: plain data, so it can run on a
+/// worker thread.
+#[derive(Default)]
+pub struct DeltaIo {
+    root_dir: String,
+    /// `(normal path, absolute path)`.
+    hash_jobs: Vec<(String, String)>,
+    link_jobs: Vec<String>,
+}
+
+/// What [`DeltaIo::run`] found, in job order.
+pub struct DeltaIoResult {
+    hashes: Vec<(String, Result<String, FileMapError>)>,
+    links: Vec<(String, Result<String, FileMapError>)>,
+}
+
+impl DeltaIo {
+    pub fn run(self) -> DeltaIoResult {
+        let path_utils = RootPathUtils::new(&self.root_dir);
+        let hashes: Vec<Result<String, FileMapError>> = self
+            .hash_jobs
+            .par_iter()
+            .map(|(_, absolute)| process::hash_file(absolute))
+            .collect();
+        let links: Vec<Result<String, FileMapError>> = self
+            .link_jobs
+            .par_iter()
+            .map(|p| process::read_link(&path_utils, p))
+            .collect();
+        DeltaIoResult {
+            hashes: self
+                .hash_jobs
+                .into_iter()
+                .map(|(normal, _)| normal)
+                .zip(hashes)
+                .collect(),
+            links: self.link_jobs.into_iter().zip(links).collect(),
+        }
+    }
+}
+
 /// A delta whose removals are applied and whose files are hashed and
 /// readlinked: waiting for the plugin workers. See [`FileMap::begin_delta`].
 pub struct DeltaSession {
@@ -397,8 +455,17 @@ impl FileMap {
     ///
     /// Nothing but the removals touches the tree here.
     pub fn begin_delta(&mut self, delta: Difference) -> Result<DeltaSession, FileMapError> {
+        let mut prepared = self.prepare_delta(delta)?;
+        let io = prepared.take_io().run();
+        Ok(self.complete_delta(prepared, io))
+    }
+
+    /// The part of [`FileMap::begin_delta`] that needs the tree: removes the
+    /// removed files and decides which files to hash and which links to read.
+    /// The file I/O is [`DeltaIo::run`], which can run on another thread.
+    pub fn prepare_delta(&mut self, delta: Difference) -> Result<PreparedDelta, FileMapError> {
         let Difference {
-            mut changed_files,
+            changed_files,
             removed_files,
         } = delta;
         // Remove files first so that we don't mistake moved modules
@@ -410,11 +477,7 @@ impl FileMap {
                 .remove_with(relative_file_path, Some(&mut recorder))?;
         }
 
-        struct HashJob {
-            normal_path: String,
-            absolute_path: String,
-        }
-        let mut hash_jobs: Vec<HashJob> = Vec::new();
+        let mut hash_jobs: Vec<(String, String)> = Vec::new();
         let mut link_jobs: Vec<String> = Vec::new();
         let mut plugin_jobs: Vec<PluginJob> = Vec::new();
         let mut processed: Vec<String> = Vec::new();
@@ -435,10 +498,10 @@ impl FileMap {
                 ) {
                     processed.push(normal_file_path.to_string());
                     if input.compute_sha1 {
-                        hash_jobs.push(HashJob {
-                            normal_path: normal_file_path.to_string(),
-                            absolute_path: path_utils.normal_to_absolute(normal_file_path),
-                        });
+                        hash_jobs.push((
+                            normal_file_path.to_string(),
+                            path_utils.normal_to_absolute(normal_file_path),
+                        ));
                     }
                     if !input.plugins_to_run.is_empty() {
                         plugin_jobs.push(PluginJob {
@@ -452,24 +515,37 @@ impl FileMap {
             }
         }
 
-        let hashes: Vec<Result<String, FileMapError>> = hash_jobs
-            .par_iter()
-            .map(|job| process::hash_file(&job.absolute_path))
-            .collect();
-        let links: Vec<Result<String, FileMapError>> = link_jobs
-            .par_iter()
-            .map(|p| process::read_link(path_utils, p))
-            .collect();
+        Ok(PreparedDelta {
+            changed_files,
+            aggregator,
+            plugin_jobs,
+            processed,
+            io: Some(DeltaIo {
+                root_dir: self.root_dir().to_string(),
+                hash_jobs,
+                link_jobs,
+            }),
+        })
+    }
 
+    /// The part of [`FileMap::begin_delta`] after the file I/O.
+    pub fn complete_delta(&mut self, prepared: PreparedDelta, io: DeltaIoResult) -> DeltaSession {
+        let PreparedDelta {
+            mut changed_files,
+            aggregator,
+            plugin_jobs,
+            processed,
+            ..
+        } = prepared;
         let mut batch_errors = Vec::new();
-        for (job, hash) in hash_jobs.iter().zip(hashes) {
+        for (normal_path, hash) in io.hashes {
             match hash {
                 Ok(sha1) => {
-                    if let Some(m) = changed_files.get_mut(&job.normal_path) {
+                    if let Some(m) = changed_files.get_mut(&normal_path) {
                         m.sha1 = Some(sha1);
                     }
                 }
-                Err(e) => batch_errors.push((job.normal_path.clone(), e)),
+                Err(e) => batch_errors.push((normal_path, e)),
             }
         }
         // `processWorkerReply`: the file is visited once its worker has run.
@@ -479,25 +555,25 @@ impl FileMap {
             }
         }
         let mut readlink_errors = Vec::new();
-        for (normal_path, link) in link_jobs.iter().zip(links) {
+        for (normal_path, link) in io.links {
             match link {
                 Ok(target) => {
-                    if let Some(m) = changed_files.get_mut(normal_path) {
+                    if let Some(m) = changed_files.get_mut(&normal_path) {
                         m.visited = true;
                         m.symlink = Symlink::Target(target);
                     }
                 }
-                Err(e) => readlink_errors.push((normal_path.clone(), e)),
+                Err(e) => readlink_errors.push((normal_path, e)),
             }
         }
 
-        Ok(DeltaSession {
+        DeltaSession {
             changed_files,
             aggregator,
             batch_errors,
             readlink_errors,
             plugin_jobs,
-        })
+        }
     }
 
     /// Second half of `FileMap.#applyFileDelta`: stores the plugin data,
