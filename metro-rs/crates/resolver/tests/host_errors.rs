@@ -37,7 +37,9 @@ impl ResolverHost for FailingHost {
     fn resolve_asset(&self, _d: &str, _n: &str, _e: &str) -> Option<Vec<String>> {
         None
     }
-    fn log_warning(&self, _m: &str) {}
+    fn log_warning(&self, _m: &str) -> Result<(), HostError> {
+        Ok(())
+    }
 }
 
 #[test]

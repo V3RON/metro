@@ -116,13 +116,13 @@ pub fn resolve_default(
                             "{} Falling back to file-based resolution. Consider updating the \
                              call site or checking there is a matching subpath inside \"imports\" of package.json.",
                             e.message()
-                        ));
+                        ))?;
                     }
                     Err(e @ ResolveError::InvalidPackageConfigurationError { .. }) => {
                         context.host().log_warning(&format!(
                             "{} Falling back to file-based resolution.",
                             e.message()
-                        ));
+                        ))?;
                     }
                     Err(e) => return Err(e),
                 }
@@ -287,7 +287,7 @@ pub fn resolve_default(
                             context.host().log_warning(&format!(
                                 "{} Falling back to hierarchical resolution for backwards compatibility.",
                                 e.message()
-                            ));
+                            ))?;
                         }
                         Err(e) => return Err(e),
                     }
@@ -358,12 +358,12 @@ pub fn resolve_default(
     }
 
     let mut extra_node_module_path: Option<String> = None;
-    if let Some(extra_node_modules) = &config.extra_node_modules {
-        if let Some(new_package_name) = extra_node_modules
-            .get(&parsed_specifier.package_name)
-            .filter(|s| !s.is_empty())
+    if let Some(new_package_name) = context
+        .host()
+        .extra_node_module(config, &parsed_specifier.package_name)?
+    {
         {
-            let p = path::join(&[new_package_name, &parsed_specifier.posix_subpath]);
+            let p = path::join(&[&new_package_name, &parsed_specifier.posix_subpath]);
             extra_node_module_path = Some(p.clone());
             let resolution = resolve_module_from_target_path(context, platform, &p)?;
             if let Some(resolution) = resolution {
@@ -637,13 +637,13 @@ fn resolve_package(
                         "{} Falling back to file-based resolution. Consider updating the \
                          call site or asking the package maintainer(s) to expose this API.",
                         e.message()
-                    ));
+                    ))?;
                 }
                 Err(e @ ResolveError::InvalidPackageConfigurationError { .. }) => {
                     ctx.host().log_warning(&format!(
                         "{} Falling back to file-based resolution.",
                         e.message()
-                    ));
+                    ))?;
                 }
                 Err(e) => return Err(e),
             }

@@ -179,7 +179,9 @@ impl ResolverHost for MemoryHost {
             .cloned()
     }
 
-    fn log_warning(&self, _message: &str) {}
+    fn log_warning(&self, _message: &str) -> Result<(), HostError> {
+        Ok(())
+    }
 }
 
 fn string_list(v: &Value) -> Vec<String> {

@@ -32,7 +32,7 @@ pub struct PackageForModule {
     pub package_json: PackageJson,
 }
 
-/// Every lookup except `resolve_asset` and `log_warning` can fail with a
+/// Every lookup except `resolve_asset` can fail with a
 /// `HostError` (a JS callback throwing); `resolve` propagates it unchanged as
 /// `ResolveError::Host`, where the JS exception would propagate.
 /// Everything the resolver needs from the outside world. All methods take
@@ -73,8 +73,26 @@ pub trait ResolverHost {
         extension: &str,
     ) -> Option<Vec<String>>;
 
-    /// `unstable_logWarning`.
-    fn log_warning(&self, message: &str);
+    /// `unstable_logWarning`. A failure (a JS callback throwing) propagates
+    /// out of `resolve`, as in JS.
+    fn log_warning(&self, message: &str) -> Result<(), HostError>;
+
+    /// `context.extraNodeModules[packageName]` when it is truthy: the
+    /// directory a package name maps to. The default reads
+    /// `config.extra_node_modules`; a JS-backed host asks the JS object
+    /// itself, which may be a Proxy or have getters.
+    fn extra_node_module(
+        &self,
+        config: &ResolverConfig,
+        package_name: &str,
+    ) -> Result<Option<String>, HostError> {
+        Ok(config
+            .extra_node_modules
+            .as_ref()
+            .and_then(|m| m.get(package_name))
+            .filter(|s| !s.is_empty())
+            .cloned())
+    }
 
     /// `URL.canParse(specifier)`, asked only for a specifier with a ':' after
     /// its first character. The default is a Rust approximation (no IDNA or
