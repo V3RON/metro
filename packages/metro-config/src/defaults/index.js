@@ -172,6 +172,7 @@ const getDefaultValues = (projectRoot: ?string): ConfigT => ({
   resetCache: false,
   reporter: new TerminalReporter(new Terminal(process.stdout)),
   unstable_perfLoggerFactory: noopPerfLoggerFactory,
+  unstable_rust: {},
 });
 
 async function getDefaultConfig(rootPath: ?string): Promise<ConfigT> {

@@ -173,6 +173,10 @@ type MetalConfigT = {
   unstable_fileMapPlugins?: ReadonlyArray<InputFileMapPlugin>,
   maxWorkers: number,
   unstable_perfLoggerFactory?: ?PerfLoggerFactory,
+  // Per-component switch to the experimental Rust implementation, keyed by
+  // component id (see metro-rust-switch). The METRO_RUST environment variable
+  // takes precedence over this option.
+  unstable_rust: {[componentId: string]: boolean},
   projectRoot: string,
   stickyWorkers: boolean,
   transformerPath: string,
