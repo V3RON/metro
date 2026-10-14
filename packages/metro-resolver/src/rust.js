@@ -68,7 +68,30 @@ type RustResolution =
   | null
   | {readonly error: string, readonly [string]: unknown};
 
+export type RustResolutionCache = {
+  clear(): void,
+  size(): number,
+  get(
+    optionsKey: string,
+    originKey: string,
+    name: string,
+    isESMImport: boolean,
+    platform: string | null,
+  ): string | null,
+  set(
+    optionsKey: string,
+    originKey: string,
+    name: string,
+    isESMImport: boolean,
+    platform: string | null,
+    filePath: string,
+  ): void,
+  ...
+};
+
+export type RustResolverBinding = ResolverBinding;
 type ResolverBinding = {
+  ResolutionCache: Class<RustResolutionCache> & {new(): RustResolutionCache},
   ResolverConfig: Class<RustResolverConfig> & {
     new(options: {...}): RustResolverConfig,
   },
@@ -81,6 +104,22 @@ type ResolverBinding = {
     flags: number,
     callback: (index: number, a: unknown, b: unknown, c: unknown) => unknown,
   ): RustResolution,
+  resolverResolveBatch(
+    cache: RustResolutionCache,
+    config: RustResolverConfig,
+    store: NativeFileStore,
+    optionsKey: string,
+    originModulePath: string,
+    originDir: string,
+    originIsUnderNodeModules: boolean,
+    assumeFlatNodeModules: boolean,
+    names: ReadonlyArray<string>,
+    depFlags: Uint8Array,
+    start: number,
+    platform: string | null,
+    flags: number,
+    callback: (index: number, a: unknown, b: unknown, c: unknown) => unknown,
+  ): Array<string>,
   ...
 };
 
@@ -95,6 +134,12 @@ const NATIVE_GET_PACKAGE_FOR_MODULE = 64;
 const VERIFY = 128;
 const EXTRA_NODE_MODULES = 256;
 const NATIVE_HASTE = 512;
+
+// Bits of the per-dependency flags of `resolverResolveBatch`. Keep in sync
+// with resolver.rs.
+const DEP_IS_ESM_IMPORT = 1;
+const DEP_CAN_PARSE_URL = 2;
+const DEP_NEEDS_JS = 4;
 
 // Indices passed to `callbackTrampoline`. Keep in sync with resolver.rs.
 const CB_FILE_SYSTEM_LOOKUP = 0;
@@ -720,4 +765,138 @@ function isResolutionError(error: unknown): boolean {
 let MissingFileInHastePackageError: any;
 export function setMissingFileInHastePackageError(errorClass: any): void {
   MissingFileInHastePackageError = errorClass;
+}
+
+/**
+ * What the batch resolution of a module needs, when this context is fully
+ * native: the binding, the store behind Metro's callbacks, and the flags that
+ * describe the context (not the dependency).
+ */
+export type BatchSupport = {
+  binding: ResolverBinding,
+  config: RustResolverConfig,
+  store: NativeFileStore,
+  flags: number,
+};
+
+/**
+ * Whether the dependencies of a module can be resolved in one native call
+ * (`resolveBatchWithRust`): the resolver runs in Rust, there is no custom
+ * `resolveRequest`, and Metro's file system, package and Haste callbacks all
+ * belong to the same native store, so that nothing but warnings, assets and
+ * `extraNodeModules` (all Metro's own) goes back to JS. Scheme resolvers are
+ * decided per specifier (`batchDependencyFlags`).
+ */
+export function getBatchSupport(
+  context: ResolutionContext,
+  platform: ?string,
+): ?BatchSupport {
+  if (context.resolveRequest != null) {
+    return null;
+  }
+  const binding = getResolverBinding(context);
+  const store = nativeStoreOf(context.fileSystemLookup);
+  if (
+    binding == null ||
+    store == null ||
+    nativeStoreOf(context.doesFileExist) !== store ||
+    nativeStoreOf(context.getPackage) !== store ||
+    nativeStoreOf(context.getPackageForModule) !== store ||
+    !isNativeHaste(context.resolveHasteModule, store, platform) ||
+    !isNativeHaste(context.resolveHastePackage, store, platform)
+  ) {
+    return null;
+  }
+  let flags =
+    NATIVE_FILE_SYSTEM_LOOKUP |
+    NATIVE_DOES_FILE_EXIST |
+    NATIVE_GET_PACKAGE |
+    NATIVE_GET_PACKAGE_FOR_MODULE |
+    NATIVE_HASTE;
+  if (context.allowHaste) {
+    flags |= ALLOW_HASTE;
+  }
+  if (context.extraNodeModules) {
+    flags |= EXTRA_NODE_MODULES;
+  }
+  if (isVerifyEnabled()) {
+    flags |= VERIFY;
+  }
+  return {binding, config: getConfigHandle(binding, context), store, flags};
+}
+
+/**
+ * The per-dependency flags of a batch: the module system, whether the
+ * specifier may be a URL, and whether a scheme resolver (JS) must answer it.
+ * The same branch order as `resolveWithRust`.
+ */
+export function batchDependencyFlags(
+  context: ResolutionContext,
+  specifier: string,
+  isESMImport: boolean,
+): number {
+  let flags = isESMImport ? DEP_IS_ESM_IMPORT : 0;
+  if (
+    !isRelativeImport(specifier) &&
+    !path.isAbsolute(specifier) &&
+    !specifier.startsWith('#') &&
+    specifier.indexOf(':') > 0 &&
+    URL.canParse(specifier)
+  ) {
+    const scheme = specifier.slice(0, specifier.indexOf(':')).toLowerCase();
+    const schemeResolvers = context.schemeResolvers;
+    if (schemeResolvers != null && Object.hasOwn(schemeResolvers, scheme)) {
+      return flags | DEP_NEEDS_JS;
+    }
+    flags |= DEP_CAN_PARSE_URL;
+  }
+  return flags;
+}
+
+/**
+ * Resolves `names[start...]` of one module in one native call, with the
+ * native resolution cache (see resolver.rs `resolverResolveBatch`). Returns
+ * the `filePath` of each dependency answered, in order. The array is shorter
+ * than `names.length - start` when it stopped at a dependency that has to be
+ * resolved the usual way; that is the dependency at `start + result.length`.
+ */
+export function resolveBatchWithRust(
+  support: BatchSupport,
+  context: ResolutionContext,
+  cache: RustResolutionCache,
+  optionsKey: string,
+  originDir: string,
+  originIsUnderNodeModules: boolean,
+  assumeFlatNodeModules: boolean,
+  names: ReadonlyArray<string>,
+  depFlags: Uint8Array,
+  start: number,
+  platform: string | null,
+): Array<string> {
+  const previousContext = currentContext;
+  currentContext = context;
+  try {
+    return support.binding.resolverResolveBatch(
+      cache,
+      support.config,
+      support.store,
+      optionsKey,
+      context.originModulePath,
+      originDir,
+      originIsUnderNodeModules,
+      assumeFlatNodeModules,
+      names,
+      depFlags,
+      start,
+      platform,
+      support.flags,
+      callbackTrampoline,
+    );
+  } finally {
+    currentContext = previousContext;
+    // A callback that threw stopped the batch. JS resolves that dependency
+    // again and meets the same exception itself.
+    hasThrown = false;
+    thrownError = null;
+  }
 }

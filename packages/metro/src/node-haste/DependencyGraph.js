@@ -15,6 +15,7 @@ import type {
 } from '../DeltaBundler/types';
 import type {DynamicRoot} from '../lib/dynamicRoots';
 import type {ResolverInputOptions} from '../shared/types';
+import type {RustResolutionCache} from 'metro-resolver/private/rust';
 import type {ModuleResolver} from './DependencyGraph/ModuleResolution';
 import type {ConfigT} from 'metro-config';
 import type {
@@ -42,6 +43,11 @@ import canonicalize from 'metro-core/private/canonicalize';
 import {DuplicateHasteCandidatesError} from 'metro-file-map';
 import RustFileSystem from 'metro-file-map/private/lib/RustFileSystem';
 import {InvalidPackageError} from 'metro-resolver';
+import {
+  batchDependencyFlags,
+  getBatchSupport,
+  resolveBatchWithRust,
+} from 'metro-resolver/private/rust';
 import {isRustEnabled, loadRustBinding} from 'metro-rust-switch';
 import EventEmitter from 'node:events';
 import path from 'node:path';
@@ -50,6 +56,21 @@ import nullthrows from 'nullthrows';
 const {createActionStartEntry, createActionEndEntry, log} = Logger;
 
 const NULL_PLATFORM = Symbol();
+
+type ResolveExtraOptions = {assumeFlatNodeModules: boolean};
+
+/**
+ * The dependencies of one module being resolved in batches, see
+ * `DependencyGraph.prepareBatchResolution`.
+ */
+export type BatchResolution = {
+  /**
+   * The `filePath` of the dependencies from `start` on that could be answered
+   * natively, in order. When fewer than all remaining, the dependency right
+   * after them has to go through `resolveDependency`.
+   */
+  resolveFrom(start: number): ReadonlyArray<string>,
+};
 
 function getOrCreateMap<T>(
   map: Map<string | symbol, Map<string | symbol, T>>,
@@ -61,6 +82,23 @@ function getOrCreateMap<T>(
     map.set(field, subMap);
   }
   return subMap;
+}
+
+function getOriginKey(
+  originModulePath: string,
+  to: string,
+  extraOptions: ResolveExtraOptions,
+): string {
+  const isSensitiveToOriginFolder =
+    // Resolution is always relative to the origin folder unless we assume a flat node_modules
+    !extraOptions.assumeFlatNodeModules ||
+    // Path requests are resolved relative to the origin folder
+    to.includes('/') ||
+    to === '.' ||
+    to === '..' ||
+    // Preserve standard assumptions under node_modules
+    originModulePath.includes(path.sep + 'node_modules' + path.sep);
+  return isSensitiveToOriginFolder ? path.dirname(originModulePath) : '';
 }
 
 export default class DependencyGraph extends EventEmitter {
@@ -94,6 +132,13 @@ export default class DependencyGraph extends EventEmitter {
       >,
     >,
   >;
+  // With the `incremental` component and a fully native resolver, the
+  // resolution cache lives here instead of in `_resolutionCache`, which then
+  // only serves METRO_RUST_VERIFY (as its shadow).
+  #nativeResolutionCache: ?RustResolutionCache = null;
+  // The JSON key of each `resolverOptions` object, made once per object.
+  #resolverOptionsKeys: WeakMap<ResolverInputOptions, string> = new WeakMap();
+  #verifyBatchResolution: boolean = false;
   _initializedPromise: Promise<void>;
   #dynamicRoots: ReadonlyArray<DynamicRoot> = [];
   #dynamicRootsSource: ?ReadonlyArray<FileMapRoot> = null;
@@ -193,6 +238,7 @@ export default class DependencyGraph extends EventEmitter {
   _onHasteChange(changeEvent: ChangeEvent) {
     const {changes, rootDir} = changeEvent;
     this._resolutionCache = new Map();
+    this.#nativeResolutionCache?.clear();
     // Also invalidates the store's package.json cache, as below.
     this.#rustFileStore?.applyChanges(changeEvent);
     [
@@ -207,17 +253,37 @@ export default class DependencyGraph extends EventEmitter {
   }
 
   _createModuleResolver() {
+    const rustFileStore = this.#rustFileStore ?? this.#nativeFileSystem;
+    const nativeHaste =
+      this.#nativeFileSystem != null &&
+      // $FlowFixMe[prop-missing] Only HastePlugin has it.
+      this._hasteMap._isNative?.() === true;
     this._moduleResolver = createModuleResolver({
       config: this._config,
       fileSystem: this._fileSystem,
       hasteMap: this._hasteMap,
       packageCache: this.#packageCache,
-      rustFileStore: this.#rustFileStore ?? this.#nativeFileSystem,
-      nativeHaste:
-        this.#nativeFileSystem != null &&
-        // $FlowFixMe[prop-missing] Only HastePlugin has it.
-        this._hasteMap._isNative?.() === true,
+      rustFileStore,
+      nativeHaste,
     });
+    if (
+      this.#nativeResolutionCache == null &&
+      rustFileStore != null &&
+      nativeHaste &&
+      // A custom resolver runs in JS for every dependency: nothing to batch.
+      this._config.resolver.resolveRequest == null &&
+      isRustEnabled('incremental', this._config.unstable_rust)
+    ) {
+      // $FlowFixMe[incompatible-use] The binding exports more than version().
+      this.#nativeResolutionCache = new (
+        loadRustBinding() as any
+      ).ResolutionCache();
+      const verify = process.env.METRO_RUST_VERIFY;
+      this.#verifyBatchResolution =
+        verify != null &&
+        verify !== '' &&
+        isRustEnabled('incremental', null, {METRO_RUST: verify});
+    }
   }
 
   _getClosestPackage(
@@ -297,27 +363,238 @@ export default class DependencyGraph extends EventEmitter {
     resolverOptions: ResolverInputOptions,
 
     // TODO: Fold assumeFlatNodeModules into resolverOptions and add to graphId
-    extraOptions: {assumeFlatNodeModules: boolean} = {
+    extraOptions: ResolveExtraOptions = {
       assumeFlatNodeModules: false,
     },
   ): BundlerResolution {
+    const nativeCache = this.#nativeResolutionCache;
+    if (nativeCache == null) {
+      return this._resolveDependencyJs(
+        originModulePath,
+        dependency,
+        platform,
+        resolverOptions,
+        extraOptions,
+      );
+    }
     const to = dependency.name;
-    const isSensitiveToOriginFolder =
-      // Resolution is always relative to the origin folder unless we assume a flat node_modules
-      !extraOptions.assumeFlatNodeModules ||
-      // Path requests are resolved relative to the origin folder
-      to.includes('/') ||
-      to === '.' ||
-      to === '..' ||
-      // Preserve standard assumptions under node_modules
-      originModulePath.includes(path.sep + 'node_modules' + path.sep);
+    const optionsKey = this.#getResolverOptionsKey(resolverOptions);
+    const originKey = getOriginKey(originModulePath, to, extraOptions);
+    const isESMImport = dependency.data.isESMImport === true;
+    const cached = nativeCache.get(
+      optionsKey,
+      originKey,
+      to,
+      isESMImport,
+      platform,
+    );
+    if (cached != null) {
+      return {type: 'sourceFile', filePath: cached};
+    }
+    const resolution = this.#resolveUncached(
+      originModulePath,
+      dependency,
+      platform,
+      resolverOptions,
+    );
+    nativeCache.set(
+      optionsKey,
+      originKey,
+      to,
+      isESMImport,
+      platform,
+      resolution.filePath,
+    );
+    return resolution;
+  }
+
+  #getResolverOptionsKey(resolverOptions: ResolverInputOptions): string {
+    if (resolverOptions == null) {
+      return JSON.stringify({}, canonicalize) ?? '';
+    }
+    let key = this.#resolverOptionsKeys.get(resolverOptions);
+    if (key == null) {
+      key = JSON.stringify(resolverOptions, canonicalize) ?? '';
+      this.#resolverOptionsKeys.set(resolverOptions, key);
+    }
+    return key;
+  }
+
+  #resolveUncached(
+    originModulePath: string,
+    dependency: TransformResultDependency,
+    platform: string | null,
+    resolverOptions: ResolverInputOptions,
+  ): BundlerResolution {
+    try {
+      return this._moduleResolver.resolveDependency(
+        originModulePath,
+        dependency,
+        true,
+        platform,
+        resolverOptions,
+      );
+    } catch (error) {
+      if (error instanceof DuplicateHasteCandidatesError) {
+        throw new AmbiguousModuleResolutionError(originModulePath, error);
+      }
+      if (error instanceof InvalidPackageError) {
+        throw new PackageResolutionError({
+          packageError: error,
+          originModulePath,
+          targetModuleName: dependency.name,
+        });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Whether `prepareBatchResolution` can ever answer: the `incremental`
+   * component is on and the resolver is fully native.
+   */
+  supportsBatchResolution(): boolean {
+    return this.#nativeResolutionCache != null;
+  }
+
+  /**
+   * Prepares the resolution of the dependencies of one module in as few
+   * native calls as possible (port/design/phase-4.md, step 3), for
+   * `buildSubgraph`. `dependencies` are the ones that call `resolve`, in
+   * order. Returns null when this module cannot be batched, and the caller
+   * then calls `resolveDependency` for each dependency.
+   *
+   * What it answers is what `resolveDependency` would answer for the same
+   * dependencies in the same order, from the same cache. It stops at the first
+   * dependency whose resolution is not a plain source file or raises an error
+   * (so that `resolveDependency` throws it, warns and records it as it does
+   * today), or that a scheme resolver answers.
+   */
+  prepareBatchResolution(
+    originModulePath: string,
+    dependencies: ReadonlyArray<TransformResultDependency>,
+    platform: string | null,
+    resolverOptions: ResolverInputOptions,
+    extraOptions: ResolveExtraOptions = {assumeFlatNodeModules: false},
+  ): ?BatchResolution {
+    const cache = this.#nativeResolutionCache;
+    if (cache == null || dependencies.length === 0) {
+      return null;
+    }
+    const context = this._moduleResolver.createContext(
+      originModulePath,
+      dependencies[0],
+      true,
+      platform,
+      resolverOptions,
+    );
+    const support = getBatchSupport(context, platform);
+    if (support == null) {
+      return null;
+    }
+    const names: Array<string> = new Array(dependencies.length);
+    const depFlags = new Uint8Array(dependencies.length);
+    for (let i = 0; i < dependencies.length; i++) {
+      const dependency = dependencies[i];
+      names[i] = dependency.name;
+      depFlags[i] = batchDependencyFlags(
+        context,
+        dependency.name,
+        dependency.data.isESMImport === true,
+      );
+    }
+    const optionsKey = this.#getResolverOptionsKey(resolverOptions);
+    const originDir = path.dirname(originModulePath);
+    const underNodeModules = originModulePath.includes(
+      path.sep + 'node_modules' + path.sep,
+    );
+    return {
+      resolveFrom: (start: number) => {
+        const paths = resolveBatchWithRust(
+          support,
+          context,
+          cache,
+          optionsKey,
+          originDir,
+          underNodeModules,
+          extraOptions.assumeFlatNodeModules,
+          names,
+          depFlags,
+          start,
+          platform,
+        );
+        if (this.#verifyBatchResolution) {
+          this.#verifyBatch(
+            originModulePath,
+            dependencies,
+            start,
+            paths,
+            platform,
+            resolverOptions,
+            extraOptions,
+          );
+        }
+        return paths;
+      },
+    };
+  }
+
+  /**
+   * METRO_RUST_VERIFY=incremental: every dependency answered natively is also
+   * resolved the JS way, with the JS cache as a shadow of the native one
+   * (cleared at the same times), and the two must agree. Warnings of the
+   * shadow resolution are dropped.
+   */
+  #verifyBatch(
+    originModulePath: string,
+    dependencies: ReadonlyArray<TransformResultDependency>,
+    start: number,
+    paths: ReadonlyArray<string>,
+    platform: string | null,
+    resolverOptions: ResolverInputOptions,
+    extraOptions: ResolveExtraOptions,
+  ): void {
+    for (let i = 0; i < paths.length; i++) {
+      const dependency = dependencies[start + i];
+      let expected: string;
+      try {
+        expected = this._moduleResolver.withoutWarnings(
+          () =>
+            this._resolveDependencyJs(
+              originModulePath,
+              dependency,
+              platform,
+              resolverOptions,
+              extraOptions,
+            ).filePath,
+        );
+      } catch (error) {
+        throw new Error(
+          `METRO_RUST_VERIFY: batch resolution of ${JSON.stringify(dependency.name)} from ${originModulePath} (platform ${String(platform)}) answered ${paths[i]}, but resolving it in JS throws: ${error.message}`,
+        );
+      }
+      if (expected !== paths[i]) {
+        throw new Error(
+          `METRO_RUST_VERIFY: batch resolution of ${JSON.stringify(dependency.name)} from ${originModulePath} (platform ${String(platform)}) differs.\n  Rust: ${paths[i]}\n  JS:   ${expected}`,
+        );
+      }
+    }
+  }
+
+  // Today's resolution, with the JS cache (a tree of maps).
+  _resolveDependencyJs(
+    originModulePath: string,
+    dependency: TransformResultDependency,
+    platform: string | null,
+    resolverOptions: ResolverInputOptions,
+    extraOptions: ResolveExtraOptions,
+  ): BundlerResolution {
+    const to = dependency.name;
 
     // Compound key for the resolver cache
     const resolverOptionsKey =
       JSON.stringify(resolverOptions ?? {}, canonicalize) ?? '';
-    const originKey = isSensitiveToOriginFolder
-      ? path.dirname(originModulePath)
-      : '';
+    const originKey = getOriginKey(originModulePath, to, extraOptions);
     const targetKey =
       to + (dependency.data.isESMImport === true ? '\0esm' : '\0cjs');
     const platformKey = platform ?? NULL_PLATFORM;
@@ -333,27 +610,12 @@ export default class DependencyGraph extends EventEmitter {
     let resolution: ?BundlerResolution = mapByPlatform.get(platformKey);
 
     if (!resolution) {
-      try {
-        resolution = this._moduleResolver.resolveDependency(
-          originModulePath,
-          dependency,
-          true,
-          platform,
-          resolverOptions,
-        );
-      } catch (error) {
-        if (error instanceof DuplicateHasteCandidatesError) {
-          throw new AmbiguousModuleResolutionError(originModulePath, error);
-        }
-        if (error instanceof InvalidPackageError) {
-          throw new PackageResolutionError({
-            packageError: error,
-            originModulePath,
-            targetModuleName: to,
-          });
-        }
-        throw error;
-      }
+      resolution = this.#resolveUncached(
+        originModulePath,
+        dependency,
+        platform,
+        resolverOptions,
+      );
     }
 
     mapByPlatform.set(platformKey, resolution);

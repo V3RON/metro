@@ -12,7 +12,8 @@ use metro_rs_file_store::{EntryKind, FileStore as Store, StoreAnswer};
 use metro_rs_haste::{HasteError, HasteMap};
 use metro_rs_resolver::{
     FileAndDirCandidates, FileCandidates, HostError, Lookup, PackageForModule, PackageJson,
-    Resolution, ResolveError, ResolveRequest, ResolverConfig as Config, ResolverHost,
+    Resolution, ResolutionCache as Cache, ResolveError, ResolveRequest, ResolverConfig as Config,
+    ResolverHost,
 };
 use napi::bindgen_prelude::{ClassInstance, Either, Uint8Array};
 use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result, ValueType};
@@ -33,6 +34,13 @@ const NATIVE_GET_PACKAGE_FOR_MODULE: u32 = 64;
 const VERIFY: u32 = 128;
 const EXTRA_NODE_MODULES: u32 = 256;
 const NATIVE_HASTE: u32 = 512;
+
+// Bits of the per-dependency flags of `resolverResolveBatch`. Keep in sync
+// with metro-resolver/src/rust.js.
+const DEP_IS_ESM_IMPORT: u8 = 1;
+const DEP_CAN_PARSE_URL: u8 = 2;
+/// A scheme resolver (JS) answers this specifier: the batch stops before it.
+const DEP_NEEDS_JS: u8 = 4;
 
 // Trampoline indices. Keep in sync with metro-resolver/src/rust.js.
 const CB_FILE_SYSTEM_LOOKUP: u32 = 0;
@@ -237,6 +245,9 @@ struct Host<'a> {
     /// The platform of the resolve, which Metro's Haste callbacks are bound to.
     platform: Option<&'a str>,
     flags: u32,
+    /// When set, warnings are collected here instead of being sent to JS, so
+    /// that a batch can drop those of a resolve it hands back to JS.
+    warnings: Option<&'a RefCell<Vec<String>>>,
 }
 
 fn napi_to_host(error: napi::Error) -> HostError {
@@ -574,6 +585,10 @@ impl ResolverHost for Host<'_> {
     }
 
     fn log_warning(&self, message: &str) -> std::result::Result<(), HostError> {
+        if let Some(warnings) = self.warnings {
+            warnings.borrow_mut().push(message.to_string());
+            return Ok(());
+        }
         self.call(CB_LOG_WARNING, &[message]).map(|_| ())
     }
 
@@ -593,6 +608,201 @@ impl ResolverHost for Host<'_> {
     fn can_parse_url(&self, _specifier: &str) -> bool {
         self.has(CAN_PARSE_URL)
     }
+}
+
+// -------------------------------------------------------- resolution cache
+
+/// `DependencyGraph`'s resolution cache (see `metro_rs_resolver::ResolutionCache`
+/// for the key), cleared by JS wherever it clears its own.
+#[napi]
+pub struct ResolutionCache {
+    cache: RefCell<Cache>,
+}
+
+impl Default for ResolutionCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[napi]
+impl ResolutionCache {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        ResolutionCache {
+            cache: RefCell::new(Cache::new()),
+        }
+    }
+
+    #[napi]
+    pub fn clear(&self) {
+        self.cache.borrow_mut().clear();
+    }
+
+    /// The number of entries.
+    #[napi]
+    pub fn size(&self) -> u32 {
+        self.cache.borrow().len() as u32
+    }
+
+    /// The cached `filePath`, or null.
+    #[napi]
+    pub fn get(
+        &self,
+        options_key: String,
+        origin_key: String,
+        name: String,
+        is_esm_import: bool,
+        platform: Option<String>,
+    ) -> Option<String> {
+        self.cache
+            .borrow()
+            .get(
+                &options_key,
+                &origin_key,
+                &name,
+                is_esm_import,
+                platform.as_deref(),
+            )
+            .map(str::to_string)
+    }
+
+    #[napi]
+    pub fn set(
+        &self,
+        options_key: String,
+        origin_key: String,
+        name: String,
+        is_esm_import: bool,
+        platform: Option<String>,
+        file_path: String,
+    ) {
+        self.cache.borrow_mut().insert(
+            &options_key,
+            &origin_key,
+            &name,
+            is_esm_import,
+            platform.as_deref(),
+            &file_path,
+        );
+    }
+}
+
+// ------------------------------------------------------------ batch resolve
+
+/// Resolves the dependencies of one module, in order, from `start`, with the
+/// resolution cache, and returns the `filePath` of each one it could answer.
+/// It stops (the array is shorter than what was asked) at the first
+/// dependency it cannot answer on its own, and JS resolves that one the usual
+/// way: a scheme resolver's specifier (`DEP_NEEDS_JS`), a resolve that fails
+/// (any error, including one from a callback), and an `empty` or `assetFiles`
+/// resolution. Warnings of a resolve that stops the batch are dropped, because
+/// JS resolves it again; those of a resolve that is answered are sent through
+/// the trampoline, in order, before the next dependency.
+///
+/// `names` is an array of strings, `dep_flags` has one byte per name.
+#[napi]
+#[allow(clippy::too_many_arguments)] // One crossing per module, by design.
+pub fn resolver_resolve_batch(
+    env: Env,
+    cache: &ResolutionCache,
+    config: &ResolverConfig,
+    store: Either<ClassInstance<FileStore>, ClassInstance<NativeFileMap>>,
+    options_key: String,
+    origin_module_path: String,
+    origin_dir: String,
+    origin_is_under_node_modules: bool,
+    assume_flat_node_modules: bool,
+    names: JsObject,
+    dep_flags: Uint8Array,
+    start: u32,
+    platform: Option<String>,
+    flags: u32,
+    callback: JsFunction,
+) -> Result<Vec<String>> {
+    let warnings = RefCell::new(Vec::new());
+    let host = Host {
+        env: &env,
+        callback: &callback,
+        store: Some(store_ref(&store)),
+        platform: platform.as_deref(),
+        flags,
+        warnings: Some(&warnings),
+    };
+    let count = names.get_array_length()?.min(dep_flags.len() as u32);
+    let mut answers = Vec::new();
+    for index in start..count {
+        let name: JsString = names.get_element(index)?;
+        let name = name.into_utf8()?.into_owned()?;
+        let dep = dep_flags[index as usize];
+        if dep & DEP_NEEDS_JS != 0 {
+            break;
+        }
+        let is_esm_import = dep & DEP_IS_ESM_IMPORT != 0;
+        let origin_key = metro_rs_resolver::origin_key(
+            &origin_dir,
+            origin_is_under_node_modules,
+            assume_flat_node_modules,
+            &name,
+        );
+        // No borrow is held while the resolver calls into JS.
+        let cached = cache
+            .cache
+            .borrow()
+            .get(
+                &options_key,
+                origin_key,
+                &name,
+                is_esm_import,
+                platform.as_deref(),
+            )
+            .map(str::to_string);
+        if let Some(file_path) = cached {
+            answers.push(file_path);
+            continue;
+        }
+        let mut resolve_flags = flags & !(IS_ESM_IMPORT | CAN_PARSE_URL);
+        if is_esm_import {
+            resolve_flags |= IS_ESM_IMPORT;
+        }
+        if dep & DEP_CAN_PARSE_URL != 0 {
+            resolve_flags |= CAN_PARSE_URL;
+        }
+        warnings.borrow_mut().clear();
+        let resolution = resolve_with_host(
+            &config.config,
+            &host,
+            &origin_module_path,
+            &name,
+            resolve_flags,
+        );
+        let Ok(Resolution::SourceFile { file_path }) = resolution else {
+            break;
+        };
+        // Answered: send its warnings now, in order. A warning callback that
+        // throws stops the batch here and JS resolves the dependency again.
+        let pending = std::mem::take(&mut *warnings.borrow_mut());
+        let mut warned = true;
+        for message in &pending {
+            if host.call(CB_LOG_WARNING, &[message]).is_err() {
+                warned = false;
+                break;
+            }
+        }
+        if !warned {
+            break;
+        }
+        cache.cache.borrow_mut().insert(
+            &options_key,
+            origin_key,
+            &name,
+            is_esm_import,
+            platform.as_deref(),
+            &file_path,
+        );
+        answers.push(file_path);
+    }
+    Ok(answers)
 }
 
 // ------------------------------------------------------------------ resolve
@@ -615,28 +825,17 @@ pub fn resolver_resolve(
     let host = Host {
         env: &env,
         callback: &callback,
-        store: store.as_ref().map(|store| match store {
-            Either::A(replica) => StoreRef::Replica(&replica.store),
-            Either::B(file_map) => StoreRef::FileMap(file_map),
-        }),
+        store: store.as_ref().map(store_ref),
         platform: platform.as_deref(),
         flags,
+        warnings: None,
     };
-    let options = Value::Object(Default::default());
-    let request = ResolveRequest {
-        origin_module_path: &origin_module_path,
-        allow_haste: flags & ALLOW_HASTE != 0,
-        is_esm_import: flags & IS_ESM_IMPORT != 0,
-        // Only custom resolvers read these, and they run in JS.
-        dev: false,
-        custom_resolver_options: &options,
-    };
-    let result = metro_rs_resolver::resolve_default(
+    let result = resolve_with_host(
         &config.config,
         &host,
-        &request,
+        &origin_module_path,
         &specifier,
-        platform.as_deref(),
+        flags,
     );
     match result {
         Ok(Resolution::SourceFile { file_path }) => {
@@ -648,6 +847,34 @@ pub fn resolver_resolve(
         Ok(Resolution::Empty) => Ok(env.get_null()?.into_unknown()),
         Err(error) => Ok(error_to_js(&env, &error)?.into_unknown()),
     }
+}
+
+fn store_ref(
+    store: &Either<ClassInstance<FileStore>, ClassInstance<NativeFileMap>>,
+) -> StoreRef<'_> {
+    match store {
+        Either::A(replica) => StoreRef::Replica(&replica.store),
+        Either::B(file_map) => StoreRef::FileMap(file_map),
+    }
+}
+
+fn resolve_with_host(
+    config: &Config,
+    host: &Host<'_>,
+    origin_module_path: &str,
+    specifier: &str,
+    flags: u32,
+) -> std::result::Result<Resolution, ResolveError> {
+    let options = Value::Object(Default::default());
+    let request = ResolveRequest {
+        origin_module_path,
+        allow_haste: flags & ALLOW_HASTE != 0,
+        is_esm_import: flags & IS_ESM_IMPORT != 0,
+        // Only custom resolvers read these, and they run in JS.
+        dev: false,
+        custom_resolver_options: &options,
+    };
+    metro_rs_resolver::resolve_default(config, host, &request, specifier, host.platform)
 }
 
 fn string_array(env: &Env, items: &[String]) -> Result<JsObject> {
