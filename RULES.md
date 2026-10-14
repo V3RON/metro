@@ -20,7 +20,8 @@ Usage:
 
 ```sh
 ./gate.sh                 # all gates for the current phase (the first one not yet approved)
-./gate.sh --quick         # inner loop: one perf run per scenario, no cold builds once caches exist
+./gate.sh --quick         # inner loop: one perf run per scenario, no cold builds once caches exist;
+                          # regressions only warn (no noise estimate), missed targets still fail
 ./gate.sh --only compile  # one gate: compile, tests or perf
 ./gate.sh --report        # full run with 5 perf runs; writes port/reports/phase-<n>.md
 ```

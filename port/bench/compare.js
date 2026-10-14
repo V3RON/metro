@@ -145,6 +145,12 @@ function main() {
       status = 'fail';
       note = `peak memory up ${Math.round((cRss / bRss - 1) * 100)}%`;
     }
+    // A single quick run has no noise estimate, so a regression there is only
+    // a warning; full runs and --report enforce it. Missed targets still fail.
+    if (QUICK && status === 'fail' && targets[s] == null) {
+      status = 'warn';
+      note += '; single run, confirm with a full ./gate.sh';
+    }
     rows.push({
       scenario: s,
       baselineMs: Math.round(bMs),
@@ -183,7 +189,7 @@ function main() {
 }
 
 function toMarkdown(r) {
-  const icon = {ok: 'pass', fail: '**FAIL**', info: 'info'};
+  const icon = {ok: 'pass', fail: '**FAIL**', info: 'info', warn: 'warning'};
   const lines = [
     `### Performance, phase ${r.phase} (${r.title})${r.quick ? ' — quick run, not valid for a phase report' : ''}`,
     '',
