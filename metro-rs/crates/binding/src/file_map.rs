@@ -752,10 +752,17 @@ impl NativeFileMap {
             return Err(napi::Error::from_reason("metro-rs: the crawl was used"));
         };
         let mut state = self.write()?;
-        let difference = state
+        let difference = match state
             .map
             .get_difference(&found.file_data, subpath.as_deref())
-            .map_err(|e| file_map_error(&env, &e))?;
+        {
+            Ok(difference) => difference,
+            Err(e) => {
+                // Rule 8: no borrow while the JS error is built.
+                drop(state);
+                return Err(file_map_error(&env, &e));
+            }
+        };
         let summary = CrawlSummary {
             changed: difference.changed_files.len() as u32,
             removed: difference.removed_files.len() as u32,
@@ -816,10 +823,14 @@ impl NativeFileMap {
     ) -> Result<DifferenceJs> {
         let files = file_data_from_compact(&files)?;
         let mut state = self.write()?;
-        let difference = state
-            .map
-            .get_difference(&files, subpath.as_deref())
-            .map_err(|e| file_map_error(&env, &e))?;
+        let difference = match state.map.get_difference(&files, subpath.as_deref()) {
+            Ok(difference) => difference,
+            Err(e) => {
+                // Rule 8: no borrow while the JS error is built.
+                drop(state);
+                return Err(file_map_error(&env, &e));
+            }
+        };
         let result = DifferenceJs {
             changed: compact_files(&difference.changed_files, state.plugin_count),
             removed: difference.removed_files.clone(),
@@ -838,10 +849,14 @@ impl NativeFileMap {
                 "metro-rs: there is no crawl result to apply",
             ));
         };
-        let prepared = state
-            .map
-            .prepare_delta(difference)
-            .map_err(|e| file_map_error(&env, &e))?;
+        let prepared = match state.map.prepare_delta(difference) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                // Rule 8: no borrow while the JS error is built.
+                drop(state);
+                return Err(file_map_error(&env, &e));
+            }
+        };
         state.prepared = Some(prepared);
         Ok(())
     }
@@ -907,10 +922,14 @@ impl NativeFileMap {
                 },
             })
             .collect();
-        let changes = state
-            .map
-            .finish_delta(session, results)
-            .map_err(|e| file_map_error(&env, &e))?;
+        let changes = match state.map.finish_delta(session, results) {
+            Ok(changes) => changes,
+            Err(e) => {
+                // Rule 8: no borrow while the JS error is built.
+                drop(state);
+                return Err(file_map_error(&env, &e));
+            }
+        };
         state.haste_on_changed(&changes);
         state.invalidate_packages(&changes);
         let size = changes.size() as u32;
@@ -980,15 +999,19 @@ impl NativeFileMap {
         is_symlink: bool,
     ) -> Result<TouchTicket> {
         let mut state = self.write()?;
-        let output = state
-            .map
-            .process_touch(&TouchInput {
-                normal_path: path,
-                mtime,
-                size,
-                is_symlink,
-            })
-            .map_err(|e| file_map_error(&env, &e))?;
+        let output = match state.map.process_touch(&TouchInput {
+            normal_path: path,
+            mtime,
+            size,
+            is_symlink,
+        }) {
+            Ok(output) => output,
+            Err(e) => {
+                // Rule 8: no borrow while the JS error is built.
+                drop(state);
+                return Err(file_map_error(&env, &e));
+            }
+        };
         let ticket = state.next_ticket;
         state.next_ticket = state.next_ticket.wrapping_add(1);
         let plugins = output.plugins_to_run.iter().map(|p| *p as u32).collect();
@@ -1066,10 +1089,14 @@ impl NativeFileMap {
                 });
             }
         }
-        let changes = state
-            .map
-            .apply_events(events)
-            .map_err(|e| file_map_error(&env, &e))?;
+        let changes = match state.map.apply_events(events) {
+            Ok(changes) => changes,
+            Err(e) => {
+                // Rule 8: no borrow while the JS error is built.
+                drop(state);
+                return Err(file_map_error(&env, &e));
+            }
+        };
         let size = changes.size();
         if size == 0 {
             return Ok(EventsApplied {
