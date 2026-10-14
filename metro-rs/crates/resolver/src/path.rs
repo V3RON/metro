@@ -110,6 +110,9 @@ pub fn normalize(p: &str) -> String {
     if p.is_empty() {
         return ".".to_string();
     }
+    if is_normalized(p) {
+        return p.to_string();
+    }
     let b = p.as_bytes();
     let absolute = b[0] == SLASH;
     let trailing_separator = b[b.len() - 1] == SLASH;
@@ -130,6 +133,25 @@ pub fn normalize(p: &str) -> String {
     }
 }
 
+/// Whether `normalize(p)` would return `p` unchanged: no empty, `.` or `..`
+/// segments, other than the empty segments of a leading `/` (absolute) and
+/// of one trailing `/` (kept by normalize). Most paths the resolver builds are
+/// already normal, and this avoids rebuilding them.
+fn is_normalized(p: &str) -> bool {
+    if p.is_empty() {
+        return false;
+    }
+    let inner = p.strip_prefix('/').unwrap_or(p);
+    let inner = inner.strip_suffix('/').unwrap_or(inner);
+    if inner.is_empty() {
+        // "/" is normal; "" and "//" are not (handled above or slow path).
+        return p == "/";
+    }
+    inner
+        .split('/')
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 /// `path.join`.
 pub fn join(args: &[&str]) -> String {
     let mut joined: Option<String> = None;
@@ -146,6 +168,7 @@ pub fn join(args: &[&str]) -> String {
     }
     match joined {
         None => ".".to_string(),
+        Some(j) if is_normalized(&j) => j,
         Some(j) => normalize(&j),
     }
 }
@@ -473,6 +496,52 @@ mod tests {
     #[test]
     fn resolve_and_relative_match_node() {
         assert_eq!(resolve(&["/a/b", "../c"]), "/a/c");
+        // The is_normalized fast path agrees with the full algorithm.
+        for p in [
+            "/",
+            "/a",
+            "/a/",
+            "a",
+            "a/",
+            "a/b/c",
+            "/a/b.js",
+            "//",
+            "/a//b",
+            "a/./b",
+            "./a",
+            "a/..",
+            "../a",
+            "/..",
+            ".",
+            "./",
+            "a/b/",
+            "/a/.b/..c/d.",
+        ] {
+            let b = p.as_bytes();
+            let absolute = b[0] == SLASH;
+            let trailing = b[b.len() - 1] == SLASH;
+            let mut out = normalize_string(b, !absolute);
+            let slow = if out.is_empty() {
+                (if absolute {
+                    "/"
+                } else if trailing {
+                    "./"
+                } else {
+                    "."
+                })
+                .to_string()
+            } else {
+                if trailing {
+                    out.push(SLASH);
+                }
+                if absolute {
+                    format!("/{}", to_string(&out))
+                } else {
+                    to_string(&out)
+                }
+            };
+            assert_eq!(normalize(p), slow, "{p}");
+        }
         assert_eq!(resolve(&["/a", "/b", "c/"]), "/b/c");
         assert_eq!(resolve(&["/"]), "/");
         assert_eq!(relative("/a/b/c", "/a/d"), "../../d");

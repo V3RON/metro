@@ -5,6 +5,7 @@
 use crate::jsstr;
 use crate::package_cache::{PackageCache, StoreAnswer};
 use crate::root_path_utils::RootPathUtils;
+use crate::tree::FxHasher;
 use crate::tree::{
     lookup_by_normal_path, Ancestor, FileId, LookupOpts, LookupOut, Node, Nodes, ReadOnly,
     ReadWrite,
@@ -14,7 +15,9 @@ use metro_rs_resolver::Lookup;
 use metro_rs_resolver::PackageForModule;
 use serde_json::Value;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 /// What a non-directory node is. A regular file has `metadata[H.SYMLINK] === 0`,
@@ -54,6 +57,36 @@ pub struct FileStore {
     path_utils: RootPathUtils,
     nodes: Nodes,
     packages: PackageCache,
+    /// Interned directories (boundary rule 4): absolute directory path as the
+    /// resolver asks for it, to the `FileId` and canonical normal path of the
+    /// directory it reaches (after following symlinks), or `None` if it is not
+    /// a directory. Lets `lookup` and `exists` resolve a directory once and
+    /// then look the basename up in it. Cleared on every change to the tree.
+    dirs: RefCell<FxHashMap<Box<str>, Option<InternedDir>>>,
+}
+
+/// An interned directory: its id and canonical normal path.
+type InternedDir = (FileId, Box<str>);
+
+type FxHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+/// Splits an absolute path into its directory and a plain basename when the
+/// directory-table fast path applies: absolute, no empty, `.` or `..`
+/// segments, and no trailing slash. Anything else takes the full walk.
+fn split_plain_absolute(path: &str) -> Option<(&str, &str)> {
+    if !path.starts_with('/') || path.ends_with('/') {
+        return None;
+    }
+    if path[1..]
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    let slash = path.rfind('/')?;
+    // The root directory itself is "/" (slash at 0).
+    let dir = if slash == 0 { "/" } else { &path[..slash] };
+    Some((dir, &path[slash + 1..]))
 }
 
 impl FileStore {
@@ -63,7 +96,82 @@ impl FileStore {
             path_utils: RootPathUtils::new(root_dir),
             nodes: Nodes::new(),
             packages: PackageCache::new(),
+            dirs: RefCell::new(FxHashMap::default()),
         }
+    }
+
+    /// The directory table entry for `dir` (see `dirs`), filled on first use.
+    fn interned_dir(&self, dir: &str) -> Option<(FileId, Box<str>)> {
+        let cached = self.dirs.borrow().get(dir).cloned();
+        if let Some(entry) = cached {
+            return entry;
+        }
+        let normal_path = self.normalize_path(dir);
+        let entry = match self.lookup_ro(&normal_path, LookupOpts::hot()) {
+            LookupOut::Found {
+                canonical_path,
+                node,
+                ..
+            } if self.nodes.is_directory(node) && node != FileId::PHANTOM => {
+                Some((node, Box::from(canonical_path.as_ref())))
+            }
+            LookupOut::Found { node, .. } if node == FileId::PHANTOM => {
+                // The detached '..' directory: not interned, the caller walks.
+                return None;
+            }
+            _ => None,
+        };
+        self.dirs.borrow_mut().insert(Box::from(dir), entry.clone());
+        entry
+    }
+
+    /// The fast path of `lookup` and `exists`: `Some(None)` when the path does
+    /// not exist, `Some(Some((node, canonical normal path)))` for a directory
+    /// or regular file, and `None` when the full walk is needed (a symlink at
+    /// the leaf, the detached '..' directory, or a path that is not plain).
+    fn lookup_via_dir(&self, mixed_path: &str) -> Option<Option<(FileId, String)>> {
+        let (dir, name) = split_plain_absolute(mixed_path)?;
+        // Only inside the root: there the normal path of `dir/name` is the
+        // normal path of `dir` plus `/name`. Above the root it is not (an
+        // ancestor of the root normalises to '..' segments).
+        let inside_root = dir == self.root_dir
+            || (dir.starts_with(self.root_dir.as_str())
+                && dir.as_bytes().get(self.root_dir.len()) == Some(&b'/')
+                && !self.root_dir.ends_with('/'));
+        if !inside_root {
+            return None;
+        }
+        let cached = self.dirs.borrow().get(dir).cloned();
+        let (dir_id, dir_canonical) = match cached {
+            Some(Some(entry)) => entry,
+            // A known non-directory: nothing below it exists.
+            Some(None) => return Some(None),
+            None => match self.interned_dir(dir) {
+                Some(entry) => entry,
+                None => {
+                    return if self.dirs.borrow().contains_key(dir) {
+                        Some(None)
+                    } else {
+                        None
+                    };
+                }
+            },
+        };
+        let child = match self.nodes.child(dir_id, name) {
+            None => return Some(None),
+            Some(child) => child,
+        };
+        if !self.nodes.is_directory(child) && !self.nodes.is_regular_file(child) {
+            // A symlink: follow it with the full walk.
+            return None;
+        }
+        let mut canonical = String::with_capacity(dir_canonical.len() + 1 + name.len());
+        if !dir_canonical.is_empty() {
+            canonical.push_str(&dir_canonical);
+            canonical.push('/');
+        }
+        canonical.push_str(name);
+        Some(Some((child, canonical)))
     }
 
     pub fn root_dir(&self) -> &str {
@@ -106,6 +214,11 @@ impl FileStore {
     /// `#getFileData(filePath)` with `followLeaf: true`: the id of the regular
     /// file, if `mixed_path` is one after following symlinks.
     fn get_file_data(&self, mixed_path: &str) -> Option<FileId> {
+        if let Some(found) = self.lookup_via_dir(mixed_path) {
+            return found
+                .map(|(node, _)| node)
+                .filter(|node| !self.nodes.is_directory(*node));
+        }
         let normal_path = self.normalize_path(mixed_path);
         match self.lookup_ro(&normal_path, LookupOpts::hot()) {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => Some(node),
@@ -121,6 +234,19 @@ impl FileStore {
 
     /// `TreeFS.lookup`. `mixed_path` is absolute or root-relative.
     pub fn lookup(&self, mixed_path: &str) -> Lookup {
+        if let Some(found) = self.lookup_via_dir(mixed_path) {
+            return match found {
+                None => Lookup::NotFound,
+                Some((node, canonical_path)) => {
+                    let real_path = self.path_utils.normal_to_absolute(&canonical_path);
+                    if self.nodes.is_directory(node) {
+                        Lookup::Dir { real_path }
+                    } else {
+                        Lookup::File { real_path }
+                    }
+                }
+            };
+        }
         let normal_path = self.normalize_path(mixed_path);
         match self.lookup_ro(&normal_path, LookupOpts::hot()) {
             LookupOut::Missing { .. } => Lookup::NotFound,
@@ -209,6 +335,8 @@ impl FileStore {
         canonical_path: &str,
         kind: EntryKind<'_>,
     ) -> Result<(), FileStoreError> {
+        // Any change can move or remove an interned directory.
+        self.dirs.get_mut().clear();
         let mixed_path = canonical_path;
         let normal_path = self.normalize_path(mixed_path);
         // Walk the tree to find the *real* path of the parent node, creating
@@ -242,6 +370,8 @@ impl FileStore {
         &mut self,
         entries: impl IntoIterator<Item = (&'a str, EntryKind<'a>)>,
     ) -> Result<(), FileStoreError> {
+        // Any change can move or remove an interned directory.
+        self.dirs.get_mut().clear();
         // Optimisation: Bulk FileData are typically clustered by directory, so we
         // optimise for that case by remembering the last directory we looked up.
         // Experiments with large result sets show this to be significantly (~30%)
@@ -293,6 +423,8 @@ impl FileStore {
     /// A directory reported by a change event (`changeListener.directoryAdded`):
     /// creates it and its missing ancestors, as `makeDirectories` does.
     pub fn add_directory(&mut self, canonical_path: &str) -> Result<(), FileStoreError> {
+        // Any change can move or remove an interned directory.
+        self.dirs.get_mut().clear();
         let lookup = self.lookup_rw(
             canonical_path,
             LookupOpts {
@@ -318,6 +450,8 @@ impl FileStore {
     /// `TreeFS.remove(mixedPath)` without a listener. Also used for removed
     /// directories: removing a directory removes everything under it.
     pub fn remove(&mut self, canonical_path: &str) {
+        // Any change can move or remove an interned directory.
+        self.dirs.get_mut().clear();
         let normal_path = self.normalize_path(canonical_path);
         self.remove_normal_path(&normal_path);
     }
@@ -435,6 +569,8 @@ impl FileStore {
         &mut self,
         batch: &ChangeBatch<'_>,
     ) -> Result<(), FileStoreError> {
+        // Any change can move or remove an interned directory.
+        self.dirs.get_mut().clear();
         let result = self.apply_tree_changes(batch);
         for (canonical_path, _) in batch.added_files.iter().chain(&batch.modified_files) {
             self.packages
