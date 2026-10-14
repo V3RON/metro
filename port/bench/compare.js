@@ -96,7 +96,12 @@ function main() {
   const targets = plan.perf.targets ?? {};
   const informational = new Set(plan.perf.informational ?? []);
   const micro = fs.readdirSync(path.join(__dirname, 'micro')).filter(f => f.endsWith('.js')).map(f => `micro:${f.slice(0, -3)}`);
-  const scenarios = ['cold-build', 'cold-filemap', 'warm-build', 'edit', ...micro];
+  // Quick runs skip cold builds once both sides' caches and the source map
+  // the micro-benchmark reads exist; they only warm the caches otherwise.
+  const warm =
+    sides.every(side => fs.existsSync(path.join(CACHE, 'bench', side.name, 'transform'))) &&
+    fs.existsSync(path.join(CACHE, 'bench', 'bench.map'));
+  const scenarios = [...(QUICK && warm ? [] : ['cold-build']), 'cold-filemap', 'warm-build', 'edit', ...micro];
   const missing = Object.keys(targets).filter(s => !scenarios.includes(s));
   const runsFor = s => (s === 'cold-build' ? (QUICK ? 1 : Math.max(1, RUNS - 1)) : RUNS);
 

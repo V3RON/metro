@@ -18,3 +18,11 @@ publish = false
 lto = true
 codegen-units = 1
 opt-level = 3
+
+# Faster-to-compile build for the gate's compile and test stages. The
+# performance gate and phase reports always use the full release profile.
+[profile.dev-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

@@ -12,15 +12,15 @@ The gates run in this order and stop at the first failure:
 
 | Gate | What it runs | Fails when |
 |---|---|---|
-| 1. compile | `cargo fmt --check`, `cargo clippy -D warnings`, the napi-rs build (`yarn --cwd metro-rs build`), a check that the binding loads in Node, `flow check`, `eslint` | Any compiler, type or lint error. Fix what the compiler says; never silence a warning with `allow` without a comment explaining why. |
+| 1. compile | `cargo fmt --check`, `cargo clippy -D warnings`, the napi-rs build with the fast `dev-fast` profile (`yarn --cwd metro-rs build:fast`), a check that the binding loads in Node, `flow check`, `eslint` | Any compiler, type or lint error. Fix what the compiler says; never silence a warning with `allow` without a comment explaining why. |
 | 2. tests | `cargo test`; the full Jest suite with `METRO_RUST=off`; the full Jest suite with the phase's components in Rust (minus the JS-only list); the differential bundle check | Any failing test, or any byte of difference between JS-built and Rust-built bundles or source maps. |
-| 3. perf | `port/bench/compare.js`: pure-JS Metro at `baselineRef` against this checkout, same machine, interleaved runs | A scenario misses the phase's target, regresses beyond tolerance (5% or the measured noise, whichever is larger), or peak memory grows over 10%. |
+| 3. perf | the release napi build (`yarn --cwd metro-rs build`, LTO), then `port/bench/compare.js`: pure-JS Metro at `baselineRef` against this checkout, same machine, interleaved runs | A scenario misses the phase's target, regresses beyond tolerance (5% or the measured noise, whichever is larger), or peak memory grows over 10%. |
 
 Usage:
 
 ```sh
 ./gate.sh                 # all gates for the current phase (the first one not yet approved)
-./gate.sh --quick         # inner loop: one perf run per scenario
+./gate.sh --quick         # inner loop: one perf run per scenario, no cold builds once caches exist
 ./gate.sh --only compile  # one gate: compile, tests or perf
 ./gate.sh --report        # full run with 5 perf runs; writes port/reports/phase-<n>.md
 ```
