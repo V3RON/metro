@@ -16,6 +16,8 @@ mod file_map;
 mod js_map;
 mod js_regex;
 mod metadata;
+#[cfg(test)]
+mod oracle_data;
 mod process;
 mod queries;
 
