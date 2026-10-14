@@ -45,6 +45,7 @@
 //! reports a directory even if nothing outside the root is tracked). It is
 //! modelled by the special id [`FileId::PHANTOM`].
 
+use crate::invariant::Invariant;
 use crate::jsstr;
 use crate::root_path_utils::RootPathUtils;
 use std::borrow::Cow;
@@ -114,6 +115,8 @@ impl Nodes {
     }
 
     pub(crate) fn alloc(&mut self, node: Node) -> FileId {
+        // Unreachable in practice: it takes 4 billion nodes. Not a JS
+        // invariant, and only mutations allocate, so it stays a panic.
         let id = FileId(u32::try_from(self.arena.len()).expect("FileId space exhausted"));
         assert!(id != FileId::PHANTOM, "FileId space exhausted");
         self.arena.push(node);
@@ -346,15 +349,15 @@ fn prefix_of<'a>(owned: Option<String>, requested: &'a str, end: usize) -> Cow<'
 /// expensive part of a file existence check. Until a symlink is hit it only
 /// borrows the requested path: no allocation happens on the common path.
 ///
-/// Panics where the JS `invariant`s throw: a symlink node without a target
-/// cannot exist here, and 'Unexpectedly escaped traversal' needs a non-normal
-/// input path.
+/// Returns `Err(Invariant)` where the JS `invariant`s throw: a symlink node
+/// without a target cannot exist here, 'Failed to collapse' and 'Unexpectedly
+/// escaped traversal' need a non-normal input path.
 pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
     acc: &mut A,
     utils: &RootPathUtils,
     requested_normal_path: &'a str,
     mut opts: LookupOpts<'_>,
-) -> LookupOut<'a> {
+) -> Result<LookupOut<'a>, Invariant> {
     // We'll update the target if we hit a symlink; until then it is the
     // requested path itself.
     let mut owned_target: Option<String> = None;
@@ -419,19 +422,19 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
                 }
                 if !opts.make_directories && segment_name != ".." {
                     if !opts.missing_details {
-                        return LookupOut::Missing {
+                        return Ok(LookupOut::Missing {
                             canonical_missing_path: String::new(),
                             missing_segment_name: String::new(),
-                        };
+                        });
                     }
-                    return LookupOut::Missing {
+                    return Ok(LookupOut::Missing {
                         canonical_missing_path: if is_last_segment {
                             target_normal_path.to_string()
                         } else {
                             target_normal_path[..from_idx - 1].to_string()
                         },
                         missing_segment_name: segment_name.to_string(),
-                    };
+                    });
                 }
                 if opts.make_directories {
                     acc.make_dir(parent_node, segment_name)
@@ -460,12 +463,12 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
                 // remove trailing `/`
                 target_normal_path.len() - 1
             };
-            return LookupOut::Found {
+            return Ok(LookupOut::Found {
                 ancestor_of_root_idx,
                 canonical_path: prefix_of(owned_target, requested_normal_path, end),
                 node: segment_node,
                 parent_node: Some(parent_node),
-            };
+            });
         }
 
         // If the next node is a directory, go into it
@@ -490,20 +493,20 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
             if nodes.is_regular_file(segment_node) {
                 // Regular file in a directory path
                 if !opts.missing_details {
-                    return LookupOut::Missing {
+                    return Ok(LookupOut::Missing {
                         canonical_missing_path: String::new(),
                         missing_segment_name: String::new(),
-                    };
+                    });
                 }
                 let current_path = if is_last_segment {
                     target_normal_path.to_string()
                 } else {
                     target_normal_path[..from_idx - 1].to_string()
                 };
-                return LookupOut::Missing {
+                return Ok(LookupOut::Missing {
                     canonical_missing_path: current_path,
                     missing_segment_name: segment_name.to_string(),
-                };
+                });
             }
 
             // Symlink in a directory path. Targets are stored already lexically
@@ -511,7 +514,11 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
             // snapshot is portable between operating systems.
             let normal_symlink_target: String = match nodes.get(segment_node) {
                 Node::Symlink(t) => t.to_string(),
-                _ => panic!("Expected symlink target to be populated."),
+                _ => {
+                    return Err(Invariant(
+                        "Expected symlink target to be populated.".to_string(),
+                    ))
+                }
             };
             let segment_name = segment_name.to_string();
 
@@ -524,7 +531,7 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
             // Append any subsequent path segments to the symlink target, and reset
             // with our new target.
             let joined_result =
-                utils.join_normal_to_relative(&normal_symlink_target, remaining_target_path);
+                utils.join_normal_to_relative(&normal_symlink_target, remaining_target_path)?;
 
             // Two special cases (covered by unit tests):
             //
@@ -584,10 +591,10 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
             });
             if seen.contains(&new_target) {
                 // TODO: Warn `Symlink cycle detected: ${[...seen, node].join(' -> ')}`
-                return LookupOut::Missing {
+                return Ok(LookupOut::Missing {
                     canonical_missing_path: new_target,
                     missing_segment_name: segment_name,
-                };
+                });
             }
             seen.insert(new_target.clone());
             owned_target = Some(new_target);
@@ -596,18 +603,17 @@ pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
             ancestor_of_root_idx = Some(0);
         }
     }
-    assert!(
-        parent_node == FileId::ROOT,
-        "Unexpectedly escaped traversal"
-    );
+    if parent_node != FileId::ROOT {
+        return Err(Invariant("Unexpectedly escaped traversal".to_string()));
+    }
     let len = owned_target
         .as_deref()
         .unwrap_or(requested_normal_path)
         .len();
-    LookupOut::Found {
+    Ok(LookupOut::Found {
         ancestor_of_root_idx: Some(0),
         canonical_path: prefix_of(owned_target, requested_normal_path, len),
         node: FileId::ROOT,
         parent_node: None,
-    }
+    })
 }

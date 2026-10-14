@@ -123,12 +123,15 @@ impl PackageCache {
             return StoreAnswer::Answer(cached.clone());
         }
 
-        let closest = fs.hierarchical_lookup(
+        // A JS invariant here means the JS would throw: let the JS callback do it.
+        let Ok(closest) = fs.hierarchical_lookup(
             absolute_module_path,
             "package.json",
             Some("node_modules"),
             false,
-        );
+        ) else {
+            return StoreAnswer::Defer;
+        };
         let Some((package_path, package_relative_path)) = closest else {
             let mut c = self.caches.borrow_mut();
             c.result_by_module_path

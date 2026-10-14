@@ -9,7 +9,6 @@ use crate::oracle_data::*;
 use crate::*;
 use serde_json::Value;
 use std::cell::Cell;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,7 +36,7 @@ fn show(l: Lookup) -> String {
 fn lookup_matches_js_treefs() {
     let fs = oracle_store();
     for (q, want) in LOOKUPS {
-        assert_eq!(show(fs.lookup(q)), *want, "lookup({q:?})");
+        assert_eq!(show(fs.lookup(q).unwrap()), *want, "lookup({q:?})");
     }
 }
 
@@ -45,7 +44,7 @@ fn lookup_matches_js_treefs() {
 fn exists_matches_js_treefs() {
     let fs = oracle_store();
     for (q, want) in EXISTS {
-        assert_eq!(fs.exists(q), *want, "exists({q:?})");
+        assert_eq!(fs.exists(q).unwrap(), *want, "exists({q:?})");
     }
 }
 
@@ -53,13 +52,15 @@ fn exists_matches_js_treefs() {
 fn hierarchical_lookup_matches_js_treefs() {
     let fs = oracle_store();
     for (start, sub, dir, brk, want) in HIER {
-        let got = catch_unwind(AssertUnwindSafe(|| {
-            fs.hierarchical_lookup(start, sub, *brk, *dir)
-        }));
+        let got = fs.hierarchical_lookup(start, sub, *brk, *dir);
         let ctx = format!("hierarchical_lookup({start:?}, {sub:?}, {brk:?}, dir={dir})");
         match want {
-            // JS throws the 'Failed to collapse' invariant; Rust panics there.
-            Hier::Throw => assert!(got.is_err(), "{ctx} should fail like the JS"),
+            // JS throws the 'Failed to collapse' invariant; Rust returns it.
+            Hier::Throw => assert_eq!(
+                got,
+                Err(Invariant("Failed to collapse".to_string())),
+                "{ctx}"
+            ),
             Hier::None => assert_eq!(got.unwrap(), None, "{ctx}"),
             Hier::Some(a, c) => {
                 assert_eq!(got.unwrap(), Some((a.to_string(), c.to_string())), "{ctx}")
@@ -73,10 +74,7 @@ fn mutations_match_js_treefs() {
     for (op, p, target, want) in MUTATIONS {
         let mut fs = oracle_store();
         let res = match *op {
-            "remove" => {
-                fs.remove(p);
-                Ok(())
-            }
+            "remove" => fs.remove(p),
             "add" => fs.add_or_modify(p, EntryKind::File),
             "addlink" => fs.add_or_modify(p, EntryKind::Symlink { target }),
             _ => unreachable!(),
@@ -98,12 +96,13 @@ fn root_path_utils_matches_js() {
             "normalToAbsolute" => u.normal_to_absolute(a),
             "relativeToNormal" => u.relative_to_normal(a).into_owned(),
             "resolveSymlinkToNormal" => u.resolve_symlink_to_normal(a, b),
-            "joinNormalToRelative" => {
-                match catch_unwind(AssertUnwindSafe(|| u.join_normal_to_relative(a, b))) {
-                    Ok(r) => format!("{}|{}", r.normal_path, r.collapsed_segments),
-                    Err(_) => "THROW".to_string(),
+            "joinNormalToRelative" => match u.join_normal_to_relative(a, b) {
+                Ok(r) => format!("{}|{}", r.normal_path, r.collapsed_segments),
+                Err(Invariant(msg)) => {
+                    assert_eq!(msg, "Failed to collapse");
+                    "THROW".to_string()
                 }
-            }
+            },
             _ => unreachable!(),
         };
         assert_eq!(got, *want, "{root} {func}({a:?}, {b:?})");
@@ -131,25 +130,29 @@ fn symlink_cycle_and_broken_links_are_not_found() {
         ("f.js", EntryKind::File),
     ])
     .unwrap();
-    assert_eq!(fs.lookup("c1"), Lookup::NotFound);
-    assert_eq!(fs.lookup("self/x"), Lookup::NotFound);
-    assert!(!fs.exists("c2"));
-    assert_eq!(fs.link_is_regular_file("c1"), Some(false));
-    assert_eq!(fs.link_is_regular_file("f.js"), Some(true));
+    assert_eq!(fs.lookup("c1").unwrap(), Lookup::NotFound);
+    assert_eq!(fs.lookup("self/x").unwrap(), Lookup::NotFound);
+    assert!(!fs.exists("c2").unwrap());
+    assert_eq!(fs.link_is_regular_file("c1").unwrap(), Some(false));
+    assert_eq!(fs.link_is_regular_file("f.js").unwrap(), Some(true));
 }
 
 #[test]
 fn ids_are_stable_and_never_reused() {
     let mut fs = FileStore::new("/p");
     fs.bulk_add([("a/f.js", EntryKind::File)]).unwrap();
-    let id = fs.file_id("a/f.js", true).unwrap();
+    let id = fs.file_id("a/f.js", true).unwrap().unwrap();
     fs.add_or_modify("a/f.js", EntryKind::Symlink { target: "x" })
         .unwrap();
-    assert_eq!(fs.file_id("a/f.js", false), Some(id), "modify keeps the id");
-    fs.remove("a/f.js");
-    assert_eq!(fs.file_id("a/f.js", false), None);
+    assert_eq!(
+        fs.file_id("a/f.js", false).unwrap(),
+        Some(id),
+        "modify keeps the id"
+    );
+    fs.remove("a/f.js").unwrap();
+    assert_eq!(fs.file_id("a/f.js", false).unwrap(), None);
     fs.add_or_modify("a/f.js", EntryKind::File).unwrap();
-    let id2 = fs.file_id("a/f.js", true).unwrap();
+    let id2 = fs.file_id("a/f.js", true).unwrap().unwrap();
     assert_ne!(id, id2, "removed ids are not reused");
 }
 
@@ -161,14 +164,14 @@ fn removal_prunes_empty_parents_but_not_the_root() {
         ("../x/y.js", EntryKind::File),
     ])
     .unwrap();
-    fs.remove("/p/q/a/b/c/d.js");
+    fs.remove("/p/q/a/b/c/d.js").unwrap();
     assert!(fs.metadata_iterator() == ["../x/y.js|f"]);
-    assert_eq!(fs.lookup("a"), Lookup::NotFound);
-    fs.remove("../x/y.js");
+    assert_eq!(fs.lookup("a").unwrap(), Lookup::NotFound);
+    fs.remove("../x/y.js").unwrap();
     assert!(fs.metadata_iterator().is_empty());
     // The detached '..' directory still reads as a directory (JS quirk).
     assert_eq!(
-        fs.lookup(".."),
+        fs.lookup("..").unwrap(),
         Lookup::Dir {
             real_path: "/p".into()
         }
@@ -187,7 +190,7 @@ fn add_errors_mirror_js_throws() {
     assert!(fs.add_directory("f.js").is_err());
     assert!(fs.add_directory("d/e").is_ok());
     assert_eq!(
-        fs.lookup("d/e"),
+        fs.lookup("d/e").unwrap(),
         Lookup::Dir {
             real_path: "/p/d/e".into()
         }
@@ -528,16 +531,16 @@ fn random_trees_match_js_treefs() {
             .collect();
         fs.bulk_add(parsed).unwrap();
         for (q, want) in queries.iter().zip(*expected) {
-            let hier = |sub: &str, dir: bool, brk: Option<&str>| match catch_unwind(
-                AssertUnwindSafe(|| fs.hierarchical_lookup(q, sub, brk, dir)),
-            ) {
+            let hier = |sub: &str, dir: bool, brk: Option<&str>| match fs
+                .hierarchical_lookup(q, sub, brk, dir)
+            {
                 Err(_) => "THROW".to_string(),
                 Ok(None) => "null".to_string(),
                 Ok(Some((a, c))) => format!("{a}>{c}"),
             };
             let got = [
-                show(fs.lookup(q)),
-                fs.exists(q).to_string(),
+                fs.lookup(q).map_or("THROW".to_string(), show),
+                fs.exists(q).map_or("THROW".to_string(), |b| b.to_string()),
                 hier("package.json", false, Some("node_modules")),
                 hier("node_modules/p", true, None),
             ]

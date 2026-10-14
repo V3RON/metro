@@ -26,6 +26,7 @@
 //! root is always the empty string, and is always a directory, so a trailing
 //! separator is redundant).
 
+use crate::invariant::Invariant;
 use metro_rs_resolver::path;
 use std::borrow::Cow;
 
@@ -240,20 +241,24 @@ impl RootPathUtils {
     /// path, including collapsing trailing '..' in the first part with leading
     /// project root segments in the relative part.
     ///
-    /// Panics where the JS `invariant` throws ('Failed to collapse'), which
+    /// Fails where the JS `invariant` throws ('Failed to collapse'), which
     /// needs a non-normal `relative_path` (a `./` after its first segment).
-    pub fn join_normal_to_relative(&self, normal_path: &str, relative_path: &str) -> JoinResult {
+    pub fn join_normal_to_relative(
+        &self,
+        normal_path: &str,
+        relative_path: &str,
+    ) -> Result<JoinResult, Invariant> {
         if normal_path.is_empty() {
-            return JoinResult {
+            return Ok(JoinResult {
                 collapsed_segments: 0,
                 normal_path: relative_path.to_string(),
-            };
+            });
         }
         if relative_path.is_empty() {
-            return JoinResult {
+            return Ok(JoinResult {
                 collapsed_segments: 0,
                 normal_path: normal_path.to_string(),
-            };
+            });
         }
         let mut raw_path = String::with_capacity(normal_path.len() + 1 + relative_path.len());
         raw_path.push_str(normal_path);
@@ -264,16 +269,16 @@ impl RootPathUtils {
         if normal_path == ".." || normal_path.ends_with("/..") {
             let (collapsed_path, collapsed_segments) = self
                 .try_collapse_indirections_in_suffix(&raw_path, 0, 0)
-                .expect("Failed to collapse");
-            return JoinResult {
+                .ok_or_else(|| Invariant("Failed to collapse".to_string()))?;
+            return Ok(JoinResult {
                 collapsed_segments,
                 normal_path: collapsed_path.into_owned(),
-            };
+            });
         }
-        JoinResult {
+        Ok(JoinResult {
             collapsed_segments: 0,
             normal_path: raw_path,
-        }
+        })
     }
 
     /// Internal: Tries to collapse sequences like `../root/foo` for root

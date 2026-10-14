@@ -2,6 +2,7 @@
 //!
 //! TODO(windows): POSIX separators only. See `tree.rs` and `root_path_utils.rs`.
 
+use crate::invariant::Invariant;
 use crate::jsstr;
 use crate::package_cache::{PackageCache, StoreAnswer};
 use crate::root_path_utils::RootPathUtils;
@@ -41,6 +42,12 @@ impl fmt::Display for FileStoreError {
 }
 
 impl std::error::Error for FileStoreError {}
+
+impl From<Invariant> for FileStoreError {
+    fn from(e: Invariant) -> Self {
+        FileStoreError(e.0)
+    }
+}
 
 /// A batch of file map changes, as the file map reports them.
 #[derive(Default, Debug, Clone)]
@@ -107,7 +114,9 @@ impl FileStore {
             return entry;
         }
         let normal_path = self.normalize_path(dir);
-        let entry = match self.lookup_ro(&normal_path, LookupOpts::hot()) {
+        // On an invariant error the full walk reports it.
+        let found = self.lookup_ro(&normal_path, LookupOpts::hot()).ok()?;
+        let entry = match found {
             LookupOut::Found {
                 canonical_path,
                 node,
@@ -190,7 +199,11 @@ impl FileStore {
         &self.path_utils
     }
 
-    fn lookup_ro<'a>(&self, normal_path: &'a str, opts: LookupOpts<'_>) -> LookupOut<'a> {
+    fn lookup_ro<'a>(
+        &self,
+        normal_path: &'a str,
+        opts: LookupOpts<'_>,
+    ) -> Result<LookupOut<'a>, Invariant> {
         lookup_by_normal_path(
             &mut ReadOnly(&self.nodes),
             &self.path_utils,
@@ -199,7 +212,11 @@ impl FileStore {
         )
     }
 
-    fn lookup_rw<'a>(&mut self, normal_path: &'a str, opts: LookupOpts<'_>) -> LookupOut<'a> {
+    fn lookup_rw<'a>(
+        &mut self,
+        normal_path: &'a str,
+        opts: LookupOpts<'_>,
+    ) -> Result<LookupOut<'a>, Invariant> {
         lookup_by_normal_path(
             &mut ReadWrite(&mut self.nodes),
             &self.path_utils,
@@ -221,29 +238,29 @@ impl FileStore {
 
     /// `#getFileData(filePath)` with `followLeaf: true`: the id of the regular
     /// file, if `mixed_path` is one after following symlinks.
-    fn get_file_data(&self, mixed_path: &str) -> Option<FileId> {
+    fn get_file_data(&self, mixed_path: &str) -> Result<Option<FileId>, Invariant> {
         if let Some(found) = self.lookup_via_dir(mixed_path) {
-            return found
+            return Ok(found
                 .map(|(node, _)| node)
-                .filter(|node| !self.nodes.is_directory(*node));
+                .filter(|node| !self.nodes.is_directory(*node)));
         }
         let normal_path = self.normalize_path(mixed_path);
-        match self.lookup_ro(&normal_path, LookupOpts::hot()) {
+        Ok(match self.lookup_ro(&normal_path, LookupOpts::hot())? {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => Some(node),
             _ => None,
-        }
+        })
     }
 
     /// `TreeFS.exists`: whether `mixed_path` is a regular file, after following
     /// symlinks.
-    pub fn exists(&self, mixed_path: &str) -> bool {
-        self.get_file_data(mixed_path).is_some()
+    pub fn exists(&self, mixed_path: &str) -> Result<bool, Invariant> {
+        Ok(self.get_file_data(mixed_path)?.is_some())
     }
 
     /// `TreeFS.lookup`. `mixed_path` is absolute or root-relative.
-    pub fn lookup(&self, mixed_path: &str) -> Lookup {
+    pub fn lookup(&self, mixed_path: &str) -> Result<Lookup, Invariant> {
         if let Some(found) = self.lookup_via_dir(mixed_path) {
-            return match found {
+            return Ok(match found {
                 None => Lookup::NotFound,
                 Some((node, canonical_path)) => {
                     let real_path = self.path_utils.normal_to_absolute(&canonical_path);
@@ -253,10 +270,10 @@ impl FileStore {
                         Lookup::File { real_path }
                     }
                 }
-            };
+            });
         }
         let normal_path = self.normalize_path(mixed_path);
-        match self.lookup_ro(&normal_path, LookupOpts::hot()) {
+        Ok(match self.lookup_ro(&normal_path, LookupOpts::hot())? {
             LookupOut::Missing { .. } => Lookup::NotFound,
             LookupOut::Found {
                 canonical_path,
@@ -268,45 +285,50 @@ impl FileStore {
                     Lookup::Dir { real_path }
                 } else {
                     // lookup follows symlinks, so should never return one
-                    assert!(
-                        self.nodes.is_regular_file(node),
-                        "lookup follows symlinks, so should never return one ({mixed_path} -> {canonical_path})"
-                    );
+                    if !self.nodes.is_regular_file(node) {
+                        return Err(Invariant(format!(
+                            "lookup follows symlinks, so should never return one ({mixed_path} -> {canonical_path})"
+                        )));
+                    }
                     Lookup::File { real_path }
                 }
             }
-        }
+        })
     }
 
     /// The kind of the node at `mixed_path` without following a leaf symlink
     /// (`linkStats`): `Some(true)` for a regular file, `Some(false)` for a
     /// symlink, `None` otherwise.
-    pub fn link_is_regular_file(&self, mixed_path: &str) -> Option<bool> {
+    pub fn link_is_regular_file(&self, mixed_path: &str) -> Result<Option<bool>, Invariant> {
         let normal_path = self.normalize_path(mixed_path);
         let opts = LookupOpts {
             follow_leaf: false,
             ..LookupOpts::hot()
         };
-        match self.lookup_ro(&normal_path, opts) {
+        Ok(match self.lookup_ro(&normal_path, opts)? {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => {
                 Some(self.nodes.is_regular_file(node))
             }
             _ => None,
-        }
+        })
     }
 
     /// The stable id of the regular file or symlink at `mixed_path`, following
     /// symlinks in directories and, if `follow_leaf`, at the leaf.
-    pub fn file_id(&self, mixed_path: &str, follow_leaf: bool) -> Option<FileId> {
+    pub fn file_id(
+        &self,
+        mixed_path: &str,
+        follow_leaf: bool,
+    ) -> Result<Option<FileId>, Invariant> {
         let normal_path = self.normalize_path(mixed_path);
         let opts = LookupOpts {
             follow_leaf,
             ..LookupOpts::hot()
         };
-        match self.lookup_ro(&normal_path, opts) {
+        Ok(match self.lookup_ro(&normal_path, opts)? {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => Some(node),
             _ => None,
-        }
+        })
     }
 
     // ---------------------------------------------------------------------
@@ -356,7 +378,7 @@ impl FileStore {
                 make_directories: true,
                 ..Default::default()
             },
-        );
+        )?;
         let LookupOut::Found {
             canonical_path: parent_canonical,
             ..
@@ -400,7 +422,7 @@ impl FileStore {
                         make_directories: true,
                         ..Default::default()
                     },
-                );
+                )?;
                 match lookup {
                     LookupOut::Missing {
                         canonical_missing_path,
@@ -440,7 +462,7 @@ impl FileStore {
                 make_directories: true,
                 ..Default::default()
             },
-        );
+        )?;
         match lookup {
             LookupOut::Found { node, .. } if self.nodes.is_directory(node) => Ok(()),
             LookupOut::Found { .. } => Err(FileStoreError(format!(
@@ -457,21 +479,21 @@ impl FileStore {
 
     /// `TreeFS.remove(mixedPath)` without a listener. Also used for removed
     /// directories: removing a directory removes everything under it.
-    pub fn remove(&mut self, canonical_path: &str) {
+    pub fn remove(&mut self, canonical_path: &str) -> Result<(), FileStoreError> {
         // Any change can move or remove an interned directory.
         self.dirs.get_mut().clear();
         let normal_path = self.normalize_path(canonical_path);
-        self.remove_normal_path(&normal_path);
+        Ok(self.remove_normal_path(&normal_path)?)
     }
 
-    fn remove_normal_path(&mut self, normal_path: &str) {
+    fn remove_normal_path(&mut self, normal_path: &str) -> Result<(), Invariant> {
         let result = self.lookup_ro(
             normal_path,
             LookupOpts {
                 follow_leaf: false,
                 ..LookupOpts::hot()
             },
-        );
+        )?;
         let LookupOut::Found {
             parent_node,
             canonical_path,
@@ -479,15 +501,15 @@ impl FileStore {
             ..
         } = result
         else {
-            return;
+            return Ok(());
         };
 
         if self.nodes.is_directory(node) && self.nodes.dir_size(node) > 0 {
             for basename in self.nodes.child_names(node) {
-                self.remove_normal_path(&format!("{canonical_path}/{basename}"));
+                self.remove_normal_path(&format!("{canonical_path}/{basename}"))?;
             }
             // Removing the last file will delete this directory
-            return;
+            return Ok(());
         }
         if let Some(parent_node) = parent_node {
             self.nodes
@@ -498,9 +520,10 @@ impl FileStore {
                 // that's not expected to be a case common enough to justify
                 // implementation complexity, or slowing down more common uses of
                 // lookup_by_normal_path.
-                self.remove_normal_path(&path::dirname(&canonical_path));
+                self.remove_normal_path(&path::dirname(&canonical_path))?;
             }
         }
+        Ok(())
     }
 
     /// Test hook: replaces how package.json files are read.
@@ -593,10 +616,10 @@ impl FileStore {
 
     fn apply_tree_changes(&mut self, batch: &ChangeBatch<'_>) -> Result<(), FileStoreError> {
         for p in &batch.removed_files {
-            self.remove(p);
+            self.remove(p)?;
         }
         for p in &batch.removed_directories {
-            self.remove(p);
+            self.remove(p)?;
         }
         let mut dirs: Vec<&str> = batch.added_directories.clone();
         dirs.sort_by_key(|d| d.matches('/').count());
@@ -640,7 +663,7 @@ impl FileStore {
         subpath: &str,
         break_on_segment: Option<&str>,
         subpath_type_dir: bool,
-    ) -> Option<(String, String)> {
+    ) -> Result<Option<(String, String)>, Invariant> {
         let mut ancestors_of_input: Vec<Ancestor> = Vec::new();
         let normal_path = self.normalize_path(mixed_start_path);
         let closest_lookup = self.lookup_ro(
@@ -649,7 +672,7 @@ impl FileStore {
                 collect_ancestors: Some(&mut ancestors_of_input),
                 ..Default::default()
             },
-        );
+        )?;
 
         match &closest_lookup {
             LookupOut::Found {
@@ -658,9 +681,9 @@ impl FileStore {
                 ..
             } if self.nodes.is_directory(*node) => {
                 if let Some(abs) =
-                    self.check_candidate_has_subpath(canonical_path, subpath, subpath_type_dir)
+                    self.check_candidate_has_subpath(canonical_path, subpath, subpath_type_dir)?
                 {
-                    return Some((abs, String::new()));
+                    return Ok(Some((abs, String::new())));
                 }
             }
             other => {
@@ -673,7 +696,7 @@ impl FileStore {
                 ) = (break_on_segment, other)
                 {
                     if missing_segment_name == b {
-                        return None;
+                        return Ok(None);
                     }
                 }
             }
@@ -696,10 +719,11 @@ impl FileStore {
                 ..
             } => {
                 common_root_depth = *idx;
-                assert!(
-                    self.nodes.is_directory(*node),
-                    "ancestors of the root must be directories"
-                );
+                if !self.nodes.is_directory(*node) {
+                    return Err(Invariant(
+                        "ancestors of the root must be directories".to_string(),
+                    ));
+                }
                 common_root = *node;
             }
             _ => {
@@ -721,12 +745,12 @@ impl FileStore {
         while candidate_idx >= common_root_depth as isize {
             let candidate = &ancestors_of_input[candidate_idx as usize];
             if Some(candidate.segment_name()) == break_on_segment {
-                return None;
+                return Ok(None);
             }
             // (The JS also passes a `start` here, which `#checkCandidateHasSubpath`
             // never forwards to the lookup.)
             if let Some(abs) =
-                self.check_candidate_has_subpath(&candidate.normal_path, subpath, subpath_type_dir)
+                self.check_candidate_has_subpath(&candidate.normal_path, subpath, subpath_type_dir)?
             {
                 // Determine the input path relative to the current candidate. Note
                 // that the candidate path will always be canonical (real), whereas the
@@ -742,7 +766,7 @@ impl FileStore {
                     prefix_length = jsstr::index_of(&normal_path, b'/', prefix_length + 1);
                 }
                 let container_relative_path = jsstr::slice(&normal_path, prefix_length + 1, None);
-                return Some((abs, container_relative_path));
+                return Ok(Some((abs, container_relative_path)));
             }
             candidate_idx -= 1;
         }
@@ -763,7 +787,7 @@ impl FileStore {
 
         while let Some(node) = next_node.filter(|n| self.nodes.is_directory(*n)) {
             if let Some(abs) =
-                self.check_candidate_has_subpath(&candidate_normal_path, subpath, subpath_type_dir)
+                self.check_candidate_has_subpath(&candidate_normal_path, subpath, subpath_type_dir)?
             {
                 let root_dir_parts = self.path_utils.get_parts();
                 let mut relative_parts: Vec<&str> = if depth_below_common_root > 0 {
@@ -792,7 +816,7 @@ impl FileStore {
                 if !remaining_normal_path.is_empty() {
                     relative_parts.push(&remaining_normal_path);
                 }
-                return Some((abs, relative_parts.join("/")));
+                return Ok(Some((abs, relative_parts.join("/"))));
             }
             depth_below_common_root += 1;
             candidate_normal_path = if candidate_normal_path.is_empty() {
@@ -802,7 +826,7 @@ impl FileStore {
             };
             next_node = self.nodes.child(node, "..");
         }
-        None
+        Ok(None)
     }
 
     /// `#checkCandidateHasSubpath`.
@@ -811,12 +835,12 @@ impl FileStore {
         normal_candidate_path: &str,
         subpath: &str,
         subpath_type_dir: bool,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, Invariant> {
         let joined = self
             .path_utils
-            .join_normal_to_relative(normal_candidate_path, subpath)
+            .join_normal_to_relative(normal_candidate_path, subpath)?
             .normal_path;
-        match self.lookup_ro(&joined, LookupOpts::hot()) {
+        Ok(match self.lookup_ro(&joined, LookupOpts::hot())? {
             LookupOut::Found {
                 node,
                 canonical_path,
@@ -827,7 +851,7 @@ impl FileStore {
                 Some(self.path_utils.normal_to_absolute(&canonical_path))
             }
             _ => None,
-        }
+        })
     }
 
     /// Every regular file and symlink as `path|f` or `path|l:<target>`, sorted.

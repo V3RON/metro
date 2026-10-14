@@ -6,6 +6,7 @@
 //! TODO(windows): POSIX separators only.
 
 mod file_store;
+mod invariant;
 mod json;
 mod jsstr;
 #[cfg(test)]
@@ -15,6 +16,7 @@ mod root_path_utils;
 mod tree;
 
 pub use file_store::{ChangeBatch, EntryKind, FileStore, FileStoreError};
+pub use invariant::Invariant;
 pub use json::{array_index, parse_like_js};
 pub use metro_rs_resolver::{Lookup, PackageForModule};
 pub use package_cache::{Defer, PackageCache, ReadPackageJsonFn, StoreAnswer};
