@@ -1,0 +1,698 @@
+{
+  "$schema_notes": "Language-neutral resolver conformance fixtures. Each case: files (absolute POSIX path -> file contents string, or {realPath} for a symlink, or a JSON object for package.json), optional context overrides (same field names as metro-resolver ResolutionContext; arrays for sets), origin module path, request specifier, platform (or null), and either expect (Resolution object) or expectError (error class name). Paths are POSIX; a Windows harness maps them. Optional: haste.modules (name -> path) backs resolveHasteModule; assets (\"<dir>/<base><ext>\" -> files) backs resolveAsset. Run with UPDATE_FIXTURES=1 to record expectations from JS Metro.",
+  "cases": [
+    {
+      "name": "relative file with extension",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/a.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./a.js",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.js"
+      }
+    },
+    {
+      "name": "relative file, extension inferred in sourceExts order",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/a.ts": "",
+        "/root/src/a.json": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./a",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.json"
+      }
+    },
+    {
+      "name": "parent directory",
+      "files": {
+        "/root/src/deep/main.js": "",
+        "/root/src/a.js": ""
+      },
+      "origin": "/root/src/deep/main.js",
+      "request": "../a",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.js"
+      }
+    },
+    {
+      "name": "absolute path",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/lib/x.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "/root/lib/x",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/lib/x.js"
+      }
+    },
+    {
+      "name": "directory resolves to index",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/dir/index.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./dir",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/dir/index.js"
+      }
+    },
+    {
+      "name": "file wins over same-named directory",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/dir.js": "",
+        "/root/src/dir/index.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./dir",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/dir.js"
+      }
+    },
+    {
+      "name": "platform extension preferred",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/a.js": "",
+        "/root/src/a.ios.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./a",
+      "platform": "ios",
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.ios.js"
+      }
+    },
+    {
+      "name": "other platform's file is ignored",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/a.js": "",
+        "/root/src/a.ios.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./a",
+      "platform": "android",
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.js"
+      }
+    },
+    {
+      "name": "native extension when preferNativePlatform",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/a.js": "",
+        "/root/src/a.native.js": ""
+      },
+      "context": {
+        "preferNativePlatform": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "./a",
+      "platform": "ios",
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.native.js"
+      }
+    },
+    {
+      "name": "platform beats native",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/a.native.js": "",
+        "/root/src/a.ios.js": ""
+      },
+      "context": {
+        "preferNativePlatform": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "./a",
+      "platform": "ios",
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/a.ios.js"
+      }
+    },
+    {
+      "name": "missing relative file",
+      "files": {
+        "/root/src/main.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./nope",
+      "platform": null,
+      "expectError": "FailedToResolvePathError"
+    },
+    {
+      "name": "package main field",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "lib/entry.js"
+        },
+        "/root/node_modules/pkg/lib/entry.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/lib/entry.js"
+      }
+    },
+    {
+      "name": "package main without extension",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "lib/entry"
+        },
+        "/root/node_modules/pkg/lib/entry.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/lib/entry.js"
+      }
+    },
+    {
+      "name": "package without main uses index",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg"
+        },
+        "/root/node_modules/pkg/index.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/index.js"
+      }
+    },
+    {
+      "name": "browser field beats main (mainFields order)",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "main.js",
+          "browser": "browser.js"
+        },
+        "/root/node_modules/pkg/main.js": "",
+        "/root/node_modules/pkg/browser.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/browser.js"
+      }
+    },
+    {
+      "name": "react-native field when listed first",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "main.js",
+          "react-native": "rn.js"
+        },
+        "/root/node_modules/pkg/main.js": "",
+        "/root/node_modules/pkg/rn.js": ""
+      },
+      "context": {
+        "mainFields": ["react-native", "browser", "main"]
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/rn.js"
+      }
+    },
+    {
+      "name": "browser field object redirects a file to false (empty module)",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "index.js",
+          "browser": {
+            "./fs-impl.js": false
+          }
+        },
+        "/root/node_modules/pkg/index.js": "",
+        "/root/node_modules/pkg/fs-impl.js": ""
+      },
+      "origin": "/root/node_modules/pkg/index.js",
+      "request": "./fs-impl",
+      "platform": null,
+      "expect": {
+        "type": "empty"
+      }
+    },
+    {
+      "name": "package subpath",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg"
+        },
+        "/root/node_modules/pkg/utils/x.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg/utils/x",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/utils/x.js"
+      }
+    },
+    {
+      "name": "scoped package",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/@scope/pkg/package.json": {
+          "name": "@scope/pkg",
+          "main": "i.js"
+        },
+        "/root/node_modules/@scope/pkg/i.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "@scope/pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/@scope/pkg/i.js"
+      }
+    },
+    {
+      "name": "hierarchical lookup walks up node_modules",
+      "files": {
+        "/root/a/b/c/main.js": "",
+        "/root/node_modules/pkg/index.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg"
+        }
+      },
+      "origin": "/root/a/b/c/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/index.js"
+      }
+    },
+    {
+      "name": "nearest node_modules wins",
+      "files": {
+        "/root/a/main.js": "",
+        "/root/a/node_modules/pkg/index.js": "",
+        "/root/a/node_modules/pkg/package.json": {
+          "name": "pkg"
+        },
+        "/root/node_modules/pkg/index.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg"
+        }
+      },
+      "origin": "/root/a/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/a/node_modules/pkg/index.js"
+      }
+    },
+    {
+      "name": "disableHierarchicalLookup only uses nodeModulesPaths",
+      "files": {
+        "/root/a/main.js": "",
+        "/root/a/node_modules/pkg/index.js": "",
+        "/root/a/node_modules/pkg/package.json": {
+          "name": "pkg"
+        },
+        "/root/vendor/pkg/index.js": "",
+        "/root/vendor/pkg/package.json": {
+          "name": "pkg"
+        }
+      },
+      "context": {
+        "disableHierarchicalLookup": true,
+        "nodeModulesPaths": ["/root/vendor"]
+      },
+      "origin": "/root/a/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/vendor/pkg/index.js"
+      }
+    },
+    {
+      "name": "extraNodeModules is a fallback",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/shim/pkg/index.js": "",
+        "/root/shim/pkg/package.json": {
+          "name": "pkg"
+        }
+      },
+      "context": {
+        "extraNodeModules": {
+          "pkg": "/root/shim/pkg"
+        }
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/shim/pkg/index.js"
+      }
+    },
+    {
+      "name": "missing package",
+      "files": {
+        "/root/src/main.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "nope",
+      "platform": null,
+      "expectError": "FailedToResolveNameError"
+    },
+    {
+      "name": "exports ignored when disabled",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "main.js",
+          "exports": "./exp.js"
+        },
+        "/root/node_modules/pkg/main.js": "",
+        "/root/node_modules/pkg/exp.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": false
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/main.js"
+      }
+    },
+    {
+      "name": "exports string when enabled",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "main": "main.js",
+          "exports": "./exp.js"
+        },
+        "/root/node_modules/pkg/main.js": "",
+        "/root/node_modules/pkg/exp.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/exp.js"
+      }
+    },
+    {
+      "name": "exports conditions: first matching condition in object order",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "exports": {
+            ".": {
+              "import": "./esm.js",
+              "require": "./cjs.js",
+              "default": "./default.js"
+            }
+          }
+        },
+        "/root/node_modules/pkg/esm.js": "",
+        "/root/node_modules/pkg/cjs.js": "",
+        "/root/node_modules/pkg/default.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": true,
+        "unstable_conditionNames": ["require"]
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/cjs.js"
+      }
+    },
+    {
+      "name": "exports platform conditions via conditionsByPlatform",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "exports": {
+            ".": {
+              "browser": "./browser.js",
+              "default": "./default.js"
+            }
+          }
+        },
+        "/root/node_modules/pkg/browser.js": "",
+        "/root/node_modules/pkg/default.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg",
+      "platform": "web",
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/browser.js"
+      }
+    },
+    {
+      "name": "exports subpath pattern",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "exports": {
+            "./features/*": "./src/features/*.js"
+          }
+        },
+        "/root/node_modules/pkg/src/features/x.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg/features/x",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/src/features/x.js"
+      }
+    },
+    {
+      "name": "exports: unlisted subpath falls back to file resolution (non-strict) with a warning",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/node_modules/pkg/package.json": {
+          "name": "pkg",
+          "exports": {
+            ".": "./index.js"
+          }
+        },
+        "/root/node_modules/pkg/index.js": "",
+        "/root/node_modules/pkg/private.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "pkg/private",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/node_modules/pkg/private.js"
+      }
+    },
+    {
+      "name": "imports field (#internal)",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/package.json": {
+          "name": "app",
+          "imports": {
+            "#utils": "./src/utils.js"
+          }
+        },
+        "/root/src/utils.js": ""
+      },
+      "context": {
+        "unstable_enablePackageExports": true
+      },
+      "origin": "/root/src/main.js",
+      "request": "#utils",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/utils.js"
+      }
+    },
+    {
+      "name": "symlinked file resolves to its real path",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/link.js": {
+          "realPath": "/root/real/target.js"
+        },
+        "/root/real/target.js": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./link",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/real/target.js"
+      }
+    },
+    {
+      "name": "haste module",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/lib/Foo.js": ""
+      },
+      "haste": {
+        "modules": {
+          "Foo": "/root/lib/Foo.js"
+        }
+      },
+      "origin": "/root/src/main.js",
+      "request": "Foo",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/lib/Foo.js"
+      }
+    },
+    {
+      "name": "a Haste module beats a node_modules package of the same name",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/lib/Foo.js": "",
+        "/root/node_modules/Foo/index.js": "",
+        "/root/node_modules/Foo/package.json": {
+          "name": "Foo"
+        }
+      },
+      "haste": {
+        "modules": {
+          "Foo": "/root/lib/Foo.js"
+        }
+      },
+      "origin": "/root/src/main.js",
+      "request": "Foo",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/lib/Foo.js"
+      }
+    },
+    {
+      "name": "haste disabled when allowHaste is false",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/lib/Foo.js": ""
+      },
+      "haste": {
+        "modules": {
+          "Foo": "/root/lib/Foo.js"
+        }
+      },
+      "context": {
+        "allowHaste": false
+      },
+      "origin": "/root/src/main.js",
+      "request": "Foo",
+      "platform": null,
+      "expectError": "FailedToResolveNameError"
+    },
+    {
+      "name": "asset by extension",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/img.png": "",
+        "/root/src/img@2x.png": ""
+      },
+      "assets": {
+        "/root/src/img.png": ["/root/src/img.png", "/root/src/img@2x.png"]
+      },
+      "origin": "/root/src/main.js",
+      "request": "./img.png",
+      "platform": null,
+      "expect": {
+        "type": "assetFiles",
+        "filePaths": ["/root/src/img.png", "/root/src/img@2x.png"]
+      },
+      "$note": "assets maps \"<dir>/<basename><ext>\" to the files context.resolveAsset(dir, basename, ext) returns"
+    },
+    {
+      "name": "an explicit path with an unlisted extension still resolves (the file map decides what exists)",
+      "files": {
+        "/root/src/main.js": "",
+        "/root/src/data.xyz": ""
+      },
+      "origin": "/root/src/main.js",
+      "request": "./data.xyz",
+      "platform": null,
+      "expect": {
+        "type": "sourceFile",
+        "filePath": "/root/src/data.xyz"
+      }
+    }
+  ]
+}

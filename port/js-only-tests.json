@@ -1,0 +1,129 @@
+{
+  "$comment": "Test files that only test the JavaScript implementation (they mock fs, mock sibling modules or call private methods). In Rust mode a file is skipped only while any of its components is switched to Rust. Changing this list needs Szymon's approval, see RULES.md.",
+  "tests": {
+    "packages/buck-worker-tool/src/__tests__/worker-test.js": {
+      "components": ["buck"],
+      "reason": "replaces fs with a mock"
+    },
+    "packages/metro-cache-key/src/__tests__/index-test.js": {
+      "components": ["cache-key"],
+      "reason": "replaces fs with a mock"
+    },
+    "packages/metro-config/src/__tests__/loadConfig-test.js": {
+      "components": ["config"],
+      "reason": "replaces fs with a mock, mocks sibling modules"
+    },
+    "packages/metro-config/src/defaults/__tests__/getMaxWorkers-test.js": {
+      "components": ["config"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-core/src/__tests__/Terminal-test.js": {
+      "components": ["core"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-file-map/src/__tests__/changes-between-starts-test.js": {
+      "components": ["file-map"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-file-map/src/__tests__/crawlerFactory-test.js": {
+      "components": ["file-map"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-file-map/src/__tests__/index-test.js": {
+      "components": ["file-map"],
+      "reason": "replaces fs with a mock, mocks sibling modules"
+    },
+    "packages/metro-file-map/src/__tests__/worker-test.js": {
+      "components": ["file-map"],
+      "reason": "replaces fs with a mock, mocks sibling modules"
+    },
+    "packages/metro-file-map/src/cache/__tests__/DiskCacheManager-test.js": {
+      "components": ["file-map"],
+      "reason": "replaces fs with a mock, mocks sibling modules"
+    },
+    "packages/metro-file-map/src/crawlers/__tests__/node-test.js": {
+      "components": ["file-map"],
+      "reason": "replaces fs with a mock"
+    },
+    "packages/metro-file-map/src/crawlers/__tests__/watchman-test.js": {
+      "components": ["file-map"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-file-map/src/crawlers/watchman/__tests__/index-test.js": {
+      "components": ["file-map"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-file-map/src/lib/__tests__/FileProcessor-test.js": {
+      "components": ["file-map"],
+      "reason": "replaces fs with a mock, mocks sibling modules"
+    },
+    "packages/metro-file-map/src/lib/__tests__/checkWatchmanCapabilities-test.js": {
+      "components": ["file-map"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-file-map/src/watchers/__tests__/WatchmanWatcher-test.js": {
+      "components": ["file-map"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-minify-terser/src/__tests__/minify-test.js": {
+      "components": ["minify"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro-transform-worker/src/__tests__/index-test.js": {
+      "components": ["transform-worker"],
+      "reason": "replaces fs with a mock"
+    },
+    "packages/metro/src/DeltaBundler/Serializers/__tests__/getAllFiles-test.js": {
+      "components": ["serializers"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/DeltaBundler/Serializers/__tests__/getAssets-test.js": {
+      "components": ["serializers"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/DeltaBundler/__tests__/DeltaBundler-test.js": {
+      "components": ["delta-core"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/DeltaBundler/__tests__/DeltaCalculator-test.js": {
+      "components": ["delta-core"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/DeltaBundler/__tests__/Transformer-test.js": {
+      "components": ["delta-core"],
+      "reason": "replaces fs with a mock"
+    },
+    "packages/metro/src/DeltaBundler/__tests__/resolver-test.js": {
+      "components": ["delta-core", "resolver", "file-map", "node-haste"],
+      "reason": "replaces fs with a mock"
+    },
+    "packages/metro/src/Server/__tests__/Server-test.js": {
+      "components": ["server"],
+      "reason": "replaces fs with a mock, mocks sibling modules, calls private methods"
+    },
+    "packages/metro/src/Server/__tests__/symbolicate-test.js": {
+      "components": ["server"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/__tests__/Assets-test.js": {
+      "components": ["assets"],
+      "reason": "replaces fs with a mock, mocks sibling modules"
+    },
+    "packages/metro/src/__tests__/Bundler-test.js": {
+      "components": ["incremental"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/__tests__/HmrServer-test.js": {
+      "components": ["hmr"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/node-haste/__tests__/DependencyGraph-test.js": {
+      "components": ["node-haste", "file-map", "resolver"],
+      "reason": "mocks sibling modules"
+    },
+    "packages/metro/src/node-haste/__tests__/PackageCache-test.js": {
+      "components": ["node-haste", "resolver"],
+      "reason": "replaces fs with a mock"
+    }
+  }
+}

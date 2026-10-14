@@ -24,6 +24,8 @@ module.exports = {
     '/node_modules/',
     'packages/[^/]+/build/',
     '<rootDir>/\\.claude/',
+    // Rust port tooling caches (baseline checkout, bench app); see RULES.md.
+    '<rootDir>/port/\\.cache/',
   ],
   snapshotFormat: {
     escapeString: true,
