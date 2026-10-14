@@ -165,6 +165,14 @@ name = "metro-rs-core"
 version = "0.1.0"
 
 [[package]]
+name = "metro-rs-file-store"
+version = "0.1.0"
+dependencies = [
+ "metro-rs-resolver",
+ "serde_json",
+]
+
+[[package]]
 name = "metro-rs-ob1"
 version = "0.1.0"
 

@@ -6,6 +6,7 @@ members = [
   "crates/source-map",
   "crates/cache-key",
   "crates/resolver",
+  "crates/file-store",
   "crates/binding",
 ]
 
