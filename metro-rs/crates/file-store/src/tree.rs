@@ -47,6 +47,7 @@
 
 use crate::jsstr;
 use crate::root_path_utils::RootPathUtils;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -239,7 +240,21 @@ pub(crate) struct Ancestor {
     pub ancestor_of_root_idx: Option<usize>,
     pub node: FileId,
     pub normal_path: String,
-    pub segment_name: String,
+    /// `None`: the last segment of `normal_path` (traversed ancestors). Set for
+    /// ancestors synthesised from the root's own path.
+    segment_name: Option<String>,
+}
+
+impl Ancestor {
+    pub(crate) fn segment_name(&self) -> &str {
+        match &self.segment_name {
+            Some(s) => s,
+            None => self
+                .normal_path
+                .rsplit_once('/')
+                .map_or(&self.normal_path, |(_, tail)| tail),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +274,20 @@ pub(crate) struct LookupOpts<'a> {
     /// traversal, useful when adding files.
     pub make_directories: bool,
     pub start: Option<Start>,
+    /// Whether `LookupOut::Missing` carries `canonical_missing_path` and
+    /// `missing_segment_name`. Hot callers that only test existence turn this
+    /// off to skip building the strings.
+    pub missing_details: bool,
+}
+
+impl LookupOpts<'_> {
+    /// Defaults for callers that ignore what is missing.
+    pub(crate) fn hot() -> Self {
+        Self {
+            missing_details: false,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for LookupOpts<'_> {
@@ -268,23 +297,38 @@ impl Default for LookupOpts<'_> {
             follow_leaf: true,
             make_directories: false,
             start: None,
+            missing_details: true,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum LookupOut {
+pub(crate) enum LookupOut<'a> {
     Found {
         ancestor_of_root_idx: Option<usize>,
-        canonical_path: String,
+        /// Borrowed from the requested path unless a symlink was followed.
+        canonical_path: Cow<'a, str>,
         node: FileId,
         /// `None` only for the root.
         parent_node: Option<FileId>,
     },
     Missing {
+        /// Empty unless `LookupOpts::missing_details`.
         canonical_missing_path: String,
+        /// Empty unless `LookupOpts::missing_details`.
         missing_segment_name: String,
     },
+}
+
+/// `target[..end]`, reusing the owned target's buffer if there is one.
+fn prefix_of<'a>(owned: Option<String>, requested: &'a str, end: usize) -> Cow<'a, str> {
+    match owned {
+        Some(mut s) => {
+            s.truncate(end);
+            Cow::Owned(s)
+        }
+        None => Cow::Borrowed(&requested[..end]),
+    }
 }
 
 /// The core traversal algorithm of TreeFS - takes a normal path and traverses
@@ -299,19 +343,21 @@ pub(crate) enum LookupOut {
 /// fails, we automatically have the real path of the first non-existent node.
 ///
 /// Note that this code is extremely hot during resolution, being the most
-/// expensive part of a file existence check.
+/// expensive part of a file existence check. Until a symlink is hit it only
+/// borrows the requested path: no allocation happens on the common path.
 ///
 /// Panics where the JS `invariant`s throw: a symlink node without a target
 /// cannot exist here, and 'Unexpectedly escaped traversal' needs a non-normal
 /// input path.
-pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
+pub(crate) fn lookup_by_normal_path<'a, A: NodeAccess>(
     acc: &mut A,
     utils: &RootPathUtils,
-    requested_normal_path: &str,
+    requested_normal_path: &'a str,
     mut opts: LookupOpts<'_>,
-) -> LookupOut {
-    // We'll update the target if we hit a symlink.
-    let mut target_normal_path = requested_normal_path.to_string();
+) -> LookupOut<'a> {
+    // We'll update the target if we hit a symlink; until then it is the
+    // requested path itself.
+    let mut owned_target: Option<String> = None;
     // Lazy-initialised set of seen target paths, to detect symlink cycles.
     let mut seen: Option<HashSet<String>> = None;
     // Pointer to the first character of the current path segment in
@@ -331,7 +377,11 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
     // collected, in UTF-16 units like the JS (compared against `fromIdx`).
     let mut unseen_path_from_idx = 0usize;
 
-    while target_normal_path.len() > from_idx {
+    loop {
+        let target_normal_path: &str = owned_target.as_deref().unwrap_or(requested_normal_path);
+        if target_normal_path.len() <= from_idx {
+            break;
+        }
         let next_sep_idx = target_normal_path[from_idx..]
             .find('/')
             .map(|i| i + from_idx);
@@ -352,23 +402,31 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
             continue;
         }
 
-        let mut segment_node = acc.nodes().child(parent_node, segment_name);
-
-        // In normal paths all indirections are at the prefix, so we are at the
-        // nth ancestor of the root iff the path so far is n '..' segments.
-        if segment_name == ".." && ancestor_of_root_idx.is_some() {
-            ancestor_of_root_idx = ancestor_of_root_idx.map(|n| n + 1);
-        } else if segment_node.is_some() {
-            ancestor_of_root_idx = None;
-        }
-
-        let segment_node = match segment_node.take() {
-            Some(n) => n,
+        let segment_node = match acc.nodes().child(parent_node, segment_name) {
+            Some(n) => {
+                // In normal paths all indirections are at the prefix, so we are at the
+                // nth ancestor of the root iff the path so far is n '..' segments.
+                if segment_name == ".." && ancestor_of_root_idx.is_some() {
+                    ancestor_of_root_idx = ancestor_of_root_idx.map(|n| n + 1);
+                } else {
+                    ancestor_of_root_idx = None;
+                }
+                n
+            }
             None => {
+                if segment_name == ".." && ancestor_of_root_idx.is_some() {
+                    ancestor_of_root_idx = ancestor_of_root_idx.map(|n| n + 1);
+                }
                 if !opts.make_directories && segment_name != ".." {
+                    if !opts.missing_details {
+                        return LookupOut::Missing {
+                            canonical_missing_path: String::new(),
+                            missing_segment_name: String::new(),
+                        };
+                    }
                     return LookupOut::Missing {
                         canonical_missing_path: if is_last_segment {
-                            target_normal_path.clone()
+                            target_normal_path.to_string()
                         } else {
                             target_normal_path[..from_idx - 1].to_string()
                         },
@@ -396,14 +454,15 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
                     || nodes.is_regular_file(segment_node)
                     || !opts.follow_leaf))
         {
+            let end = if is_last_segment {
+                target_normal_path.len()
+            } else {
+                // remove trailing `/`
+                target_normal_path.len() - 1
+            };
             return LookupOut::Found {
                 ancestor_of_root_idx,
-                canonical_path: if is_last_segment {
-                    target_normal_path
-                } else {
-                    // remove trailing `/`
-                    target_normal_path[..target_normal_path.len() - 1].to_string()
-                },
+                canonical_path: prefix_of(owned_target, requested_normal_path, end),
                 node: segment_node,
                 parent_node: Some(parent_node),
             };
@@ -415,7 +474,7 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
             if let Some(collect) = opts.collect_ancestors.as_deref_mut() {
                 if is_unseen {
                     let current_path = if is_last_segment {
-                        target_normal_path.clone()
+                        target_normal_path.to_string()
                     } else {
                         target_normal_path[..from_idx - 1].to_string()
                     };
@@ -423,19 +482,24 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
                         ancestor_of_root_idx,
                         node: segment_node,
                         normal_path: current_path,
-                        segment_name: segment_name.to_string(),
+                        segment_name: None,
                     });
                 }
             }
         } else {
-            let current_path = if is_last_segment {
-                target_normal_path.clone()
-            } else {
-                target_normal_path[..from_idx - 1].to_string()
-            };
-
             if nodes.is_regular_file(segment_node) {
                 // Regular file in a directory path
+                if !opts.missing_details {
+                    return LookupOut::Missing {
+                        canonical_missing_path: String::new(),
+                        missing_segment_name: String::new(),
+                    };
+                }
+                let current_path = if is_last_segment {
+                    target_normal_path.to_string()
+                } else {
+                    target_normal_path[..from_idx - 1].to_string()
+                };
                 return LookupOut::Missing {
                     canonical_missing_path: current_path,
                     missing_segment_name: segment_name.to_string(),
@@ -462,8 +526,6 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
             let joined_result =
                 utils.join_normal_to_relative(&normal_symlink_target, remaining_target_path);
 
-            target_normal_path = joined_result.normal_path;
-
             // Two special cases (covered by unit tests):
             //
             // If the symlink target is the root, the root should be a counted as
@@ -488,7 +550,7 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
                             ancestor_of_root_idx: Some(i),
                             node,
                             normal_path: collapsed_path.clone(),
-                            segment_name: utils.get_basename_of_nth_ancestor(i).to_string(),
+                            segment_name: Some(utils.get_basename_of_nth_ancestor(i).to_string()),
                         });
                         // `node.get('..') ?? new Map()`
                         node = acc.nodes().child(node, "..").unwrap_or(FileId::PHANTOM);
@@ -513,20 +575,22 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
                 None => 0,
             };
 
+            let new_target = joined_result.normal_path;
             // Optimisation: set this lazily only when we've encountered a symlink
             let seen = seen.get_or_insert_with(|| {
                 let mut s = HashSet::new();
                 s.insert(requested_normal_path.to_string());
                 s
             });
-            if seen.contains(&target_normal_path) {
+            if seen.contains(&new_target) {
                 // TODO: Warn `Symlink cycle detected: ${[...seen, node].join(' -> ')}`
                 return LookupOut::Missing {
-                    canonical_missing_path: target_normal_path,
+                    canonical_missing_path: new_target,
                     missing_segment_name: segment_name,
                 };
             }
-            seen.insert(target_normal_path.clone());
+            seen.insert(new_target.clone());
+            owned_target = Some(new_target);
             from_idx = 0;
             parent_node = FileId::ROOT;
             ancestor_of_root_idx = Some(0);
@@ -536,9 +600,13 @@ pub(crate) fn lookup_by_normal_path<A: NodeAccess>(
         parent_node == FileId::ROOT,
         "Unexpectedly escaped traversal"
     );
+    let len = owned_target
+        .as_deref()
+        .unwrap_or(requested_normal_path)
+        .len();
     LookupOut::Found {
         ancestor_of_root_idx: Some(0),
-        canonical_path: target_normal_path,
+        canonical_path: prefix_of(owned_target, requested_normal_path, len),
         node: FileId::ROOT,
         parent_node: None,
     }

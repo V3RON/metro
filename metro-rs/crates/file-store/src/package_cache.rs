@@ -9,11 +9,11 @@
 
 use crate::file_store::FileStore;
 use crate::json;
+use crate::tree::FxHasher;
 use metro_rs_resolver::path;
 use metro_rs_resolver::PackageForModule;
 use serde_json::Value;
 use std::cell::RefCell;
-use crate::tree::FxHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 

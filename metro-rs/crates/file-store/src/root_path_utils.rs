@@ -27,6 +27,7 @@
 //! separator is redundant).
 
 use metro_rs_resolver::path;
+use std::borrow::Cow;
 
 const SEP: u8 = b'/';
 const UP_FRAGMENT_SEP: &str = "../";
@@ -110,7 +111,7 @@ impl RootPathUtils {
     }
 
     /// `absolutePath` may be any well-formed absolute path.
-    pub fn absolute_to_normal(&self, absolute_path: &str) -> String {
+    pub fn absolute_to_normal<'a>(&self, absolute_path: &'a str) -> Cow<'a, str> {
         let ab = absolute_path.as_bytes();
         let mut end_of_matching_prefix = 0usize;
         let mut last_matching_part_idx = 0usize;
@@ -147,7 +148,7 @@ impl RootPathUtils {
             up_indirections_to_prepend,
         ) {
             Some((collapsed, _)) => collapsed,
-            None => self.slow_absolute_to_normal(absolute_path),
+            None => Cow::Owned(self.slow_absolute_to_normal(absolute_path)),
         }
     }
 
@@ -188,19 +189,22 @@ impl RootPathUtils {
         }
         // left may already end in a path separator only if it is a filesystem root,
         // '/' or 'X:\'.
-        if i == self.root_depth {
-            return format!("{left}{right}");
+        let mut out = String::with_capacity(left.len() + 1 + right.len());
+        out.push_str(left);
+        if i != self.root_depth {
+            out.push('/');
         }
-        format!("{left}/{right}")
+        out.push_str(right);
+        out
     }
 
-    pub fn relative_to_normal(&self, relative_path: &str) -> String {
+    pub fn relative_to_normal<'a>(&self, relative_path: &'a str) -> Cow<'a, str> {
         match self.try_collapse_indirections_in_suffix(relative_path, 0, 0) {
             Some((collapsed, _)) => collapsed,
-            None => path::relative(
+            None => Cow::Owned(path::relative(
                 &self.root_dir,
                 &path::join(&[&self.root_dir, relative_path]),
-            ),
+            )),
         }
     }
 
@@ -215,12 +219,14 @@ impl RootPathUtils {
         //
         // readlink returns whatever the link was created with, which need not be
         // well-formed (e.g. '..', 'a/./b', 'a//b'), so resolve with node:path.
-        let normal = self.absolute_to_normal(&path::resolve(&[
-            &self.root_dir,
-            symlink_normal_path,
-            "..",
-            readlink_result,
-        ]));
+        let normal = self
+            .absolute_to_normal(&path::resolve(&[
+                &self.root_dir,
+                symlink_normal_path,
+                "..",
+                readlink_result,
+            ]))
+            .into_owned();
         // Normalization keeps a trailing separator when the result is the root or
         // an ancestor of it (e.g. a link to '/'), and readlink itself may return
         // one. A stored symlink target never has one.
@@ -261,7 +267,7 @@ impl RootPathUtils {
                 .expect("Failed to collapse");
             return JoinResult {
                 collapsed_segments,
-                normal_path: collapsed_path,
+                normal_path: collapsed_path.into_owned(),
             };
         }
         JoinResult {
@@ -276,12 +282,12 @@ impl RootPathUtils {
     /// `full_path` is a string ending with the relative path to process,
     /// `start_of_relative_part` the index of the start of the part to process,
     /// and `implicit_up_indirections` 0=root-relative, 1=dirname(root)-relative...
-    fn try_collapse_indirections_in_suffix(
+    fn try_collapse_indirections_in_suffix<'a>(
         &self,
-        full_path: &str,
+        full_path: &'a str,
         start_of_relative_part: usize,
         implicit_up_indirections: usize,
-    ) -> Option<(String, usize)> {
+    ) -> Option<(Cow<'a, str>, usize)> {
         let fp = full_path.as_bytes();
         let mut total_up_indirections = implicit_up_indirections;
         let mut collapsed_segments = 0usize;
@@ -328,13 +334,13 @@ impl RootPathUtils {
                 // we know that fullPath[pos] is a separator.
                 if pos >= fp.len() {
                     let collapsed_path = if total_up_indirections > 0 {
-                        format!(
+                        Cow::Owned(format!(
                             "{}..{}",
                             UP_FRAGMENT_SEP.repeat(total_up_indirections - 1),
                             slice_from(full_path, pos.saturating_sub(1))
-                        )
+                        ))
                     } else {
-                        String::new()
+                        Cow::Borrowed("")
                     };
                     return Some((collapsed_path, collapsed_segments));
                 }
@@ -348,14 +354,18 @@ impl RootPathUtils {
                     // below the root), just ensure we don't include a trailing separator.
                     let mut s = UP_FRAGMENT_SEP.repeat(total_up_indirections);
                     s.pop();
-                    return Some((s, collapsed_segments));
+                    return Some((Cow::Owned(s), collapsed_segments));
                 }
                 // Optimisation for the common case, saves a concatenation.
                 if total_up_indirections == 0 {
-                    return Some((right.to_string(), collapsed_segments));
+                    return Some((Cow::Borrowed(right), collapsed_segments));
                 }
                 return Some((
-                    format!("{}{}", UP_FRAGMENT_SEP.repeat(total_up_indirections), right),
+                    Cow::Owned(format!(
+                        "{}{}",
+                        UP_FRAGMENT_SEP.repeat(total_up_indirections),
+                        right
+                    )),
                     collapsed_segments,
                 ));
             };

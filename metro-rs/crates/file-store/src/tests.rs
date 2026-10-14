@@ -94,9 +94,9 @@ fn root_path_utils_matches_js() {
     for (root, func, a, b, want) in RPU {
         let u = RootPathUtils::new(root);
         let got = match *func {
-            "absoluteToNormal" => u.absolute_to_normal(a),
+            "absoluteToNormal" => u.absolute_to_normal(a).into_owned(),
             "normalToAbsolute" => u.normal_to_absolute(a),
-            "relativeToNormal" => u.relative_to_normal(a),
+            "relativeToNormal" => u.relative_to_normal(a).into_owned(),
             "resolveSymlinkToNormal" => u.resolve_symlink_to_normal(a, b),
             "joinNormalToRelative" => {
                 match catch_unwind(AssertUnwindSafe(|| u.join_normal_to_relative(a, b))) {

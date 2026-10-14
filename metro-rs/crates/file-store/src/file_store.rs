@@ -13,6 +13,7 @@ use metro_rs_resolver::path;
 use metro_rs_resolver::Lookup;
 use metro_rs_resolver::PackageForModule;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -73,7 +74,7 @@ impl FileStore {
         &self.path_utils
     }
 
-    fn lookup_ro(&self, normal_path: &str, opts: LookupOpts<'_>) -> LookupOut {
+    fn lookup_ro<'a>(&self, normal_path: &'a str, opts: LookupOpts<'_>) -> LookupOut<'a> {
         lookup_by_normal_path(
             &mut ReadOnly(&self.nodes),
             &self.path_utils,
@@ -82,7 +83,7 @@ impl FileStore {
         )
     }
 
-    fn lookup_rw(&mut self, normal_path: &str, opts: LookupOpts<'_>) -> LookupOut {
+    fn lookup_rw<'a>(&mut self, normal_path: &'a str, opts: LookupOpts<'_>) -> LookupOut<'a> {
         lookup_by_normal_path(
             &mut ReadWrite(&mut self.nodes),
             &self.path_utils,
@@ -92,7 +93,7 @@ impl FileStore {
     }
 
     /// `#normalizePath`.
-    pub fn normalize_path(&self, relative_or_absolute_path: &str) -> String {
+    pub fn normalize_path<'a>(&self, relative_or_absolute_path: &'a str) -> Cow<'a, str> {
         if path::is_absolute(relative_or_absolute_path) {
             self.path_utils
                 .absolute_to_normal(relative_or_absolute_path)
@@ -106,7 +107,7 @@ impl FileStore {
     /// file, if `mixed_path` is one after following symlinks.
     fn get_file_data(&self, mixed_path: &str) -> Option<FileId> {
         let normal_path = self.normalize_path(mixed_path);
-        match self.lookup_ro(&normal_path, LookupOpts::default()) {
+        match self.lookup_ro(&normal_path, LookupOpts::hot()) {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => Some(node),
             _ => None,
         }
@@ -121,7 +122,7 @@ impl FileStore {
     /// `TreeFS.lookup`. `mixed_path` is absolute or root-relative.
     pub fn lookup(&self, mixed_path: &str) -> Lookup {
         let normal_path = self.normalize_path(mixed_path);
-        match self.lookup_ro(&normal_path, LookupOpts::default()) {
+        match self.lookup_ro(&normal_path, LookupOpts::hot()) {
             LookupOut::Missing { .. } => Lookup::NotFound,
             LookupOut::Found {
                 canonical_path,
@@ -150,7 +151,7 @@ impl FileStore {
         let normal_path = self.normalize_path(mixed_path);
         let opts = LookupOpts {
             follow_leaf: false,
-            ..Default::default()
+            ..LookupOpts::hot()
         };
         match self.lookup_ro(&normal_path, opts) {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => {
@@ -166,7 +167,7 @@ impl FileStore {
         let normal_path = self.normalize_path(mixed_path);
         let opts = LookupOpts {
             follow_leaf,
-            ..Default::default()
+            ..LookupOpts::hot()
         };
         match self.lookup_ro(&normal_path, opts) {
             LookupOut::Found { node, .. } if !self.nodes.is_directory(node) => Some(node),
@@ -212,8 +213,9 @@ impl FileStore {
         let normal_path = self.normalize_path(mixed_path);
         // Walk the tree to find the *real* path of the parent node, creating
         // directories as we need.
+        let parent_dirname = path::dirname(&normal_path);
         let parent_dir_node = self.lookup_rw(
-            &path::dirname(&normal_path),
+            &parent_dirname,
             LookupOpts {
                 make_directories: true,
                 ..Default::default()
@@ -229,12 +231,9 @@ impl FileStore {
             )));
         };
         // Normalize the resulting path to account for the parent node being root.
-        let canonical = self.normalize_path(&format!(
-            "{}/{}",
-            parent_canonical,
-            path::basename(&normal_path)
-        ));
-        self.bulk_add([(canonical.as_str(), kind)])
+        let joined = format!("{}/{}", parent_canonical, path::basename(&normal_path));
+        let canonical = self.normalize_path(&joined).into_owned();
+        self.bulk_add([(&*canonical, kind)])
     }
 
     /// `TreeFS.bulkAddOrModify` without a listener. Entries are canonical
@@ -328,7 +327,7 @@ impl FileStore {
             normal_path,
             LookupOpts {
                 follow_leaf: false,
-                ..Default::default()
+                ..LookupOpts::hot()
             },
         );
         let LookupOut::Found {
@@ -577,7 +576,7 @@ impl FileStore {
         let mut candidate_idx = ancestors_of_input.len() as isize - 1;
         while candidate_idx >= common_root_depth as isize {
             let candidate = &ancestors_of_input[candidate_idx as usize];
-            if Some(candidate.segment_name.as_str()) == break_on_segment {
+            if Some(candidate.segment_name()) == break_on_segment {
                 return None;
             }
             // (The JS also passes a `start` here, which `#checkCandidateHasSubpath`
@@ -673,7 +672,7 @@ impl FileStore {
             .path_utils
             .join_normal_to_relative(normal_candidate_path, subpath)
             .normal_path;
-        match self.lookup_ro(&joined, LookupOpts::default()) {
+        match self.lookup_ro(&joined, LookupOpts::hot()) {
             LookupOut::Found {
                 node,
                 canonical_path,
