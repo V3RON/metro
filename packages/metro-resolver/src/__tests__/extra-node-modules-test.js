@@ -24,7 +24,10 @@ describe('extraNodeModules', () => {
     '/root/shared/lib/util.js': '',
   };
 
-  const resolveWith = (extraNodeModules: {...}, specifier: string) =>
+  const resolveWith = (
+    extraNodeModules: {[packageName: string]: string, ...},
+    specifier: string,
+  ) =>
     Resolver.resolve(
       {
         ...createResolutionContext(fileMap),

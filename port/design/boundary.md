@@ -29,7 +29,11 @@ The switch sits inside metro-resolver's public `resolve()` (packages/metro-resol
 
 ## Config handles
 
-- **When a handle is created.** `new ResolverConfig({...})` is created once per configuration. rust.js matches configurations by content on every resolve: the arrays, the `assetExts` Set and `unstable_conditionsByPlatform`, element by element. This is cheap, since they are a few short lists.
+- **When a handle is created.** `new ResolverConfig({...})` is created once per configuration.
+- **How a resolve finds its handle.**
+  - **Cheap check first:** if the context passes the same objects as last time, with the same sizes and flags, it reuses the handle.
+  - **Full comparison otherwise:** it compares by content, element by element: the arrays, the `assetExts` Set and `unstable_conditionsByPlatform`.
+  - **Known difference:** replacing an element in place without changing the size (`sourceExts[0] = 'mjs'`) is not noticed. A push or add is noticed. An element-by-element check on every resolve cost about 1.4 µs per resolve.
 - **Why by content.** An in-place change such as `sourceExts.push(...)` gets a new handle. An equal configuration in new objects reuses the old one, together with its "exports" cache. Metro builds a new `assetExts` Set after every change batch.
 - **How many are kept.** At most 8 handles, most recently used first.
 - **What a call carries.** The handle plus scalars and three strings: origin, specifier and platform.

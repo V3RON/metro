@@ -271,7 +271,23 @@ type ConfigSnapshot = {
   unstable_incrementalResolution: boolean,
 };
 
-type ConfigEntry = {snapshot: ConfigSnapshot, handle: RustResolverConfig};
+// The objects a snapshot was last matched against. When the context passes
+// the same objects with the same sizes, the entry matches without comparing
+// elements (the common case: Metro passes the same objects every time).
+type ConfigSources = {
+  assetExts: ReadonlySet<string>,
+  mainFields: ReadonlyArray<string>,
+  nodeModulesPaths: ReadonlyArray<string>,
+  sourceExts: ReadonlyArray<string>,
+  unstable_conditionNames: ReadonlyArray<string>,
+  unstable_conditionsByPlatform: ResolutionContext['unstable_conditionsByPlatform'],
+};
+
+type ConfigEntry = {
+  snapshot: ConfigSnapshot,
+  sources: ConfigSources,
+  handle: RustResolverConfig,
+};
 
 // Most recently used first. A handle holds the "exports" cache, so reusing it
 // matters; the list is bounded so configurations that are never seen again
@@ -374,13 +390,61 @@ function snapshotOf(context: ResolutionContext): ConfigSnapshot {
   };
 }
 
+function sourcesOf(context: ResolutionContext): ConfigSources {
+  return {
+    assetExts: context.assetExts,
+    mainFields: context.mainFields,
+    nodeModulesPaths: context.nodeModulesPaths,
+    sourceExts: context.sourceExts,
+    unstable_conditionNames: context.unstable_conditionNames,
+    unstable_conditionsByPlatform: context.unstable_conditionsByPlatform,
+  };
+}
+
+/**
+ * The cheap check: the same objects as last time, with the sizes of the
+ * snapshot, and the same flags. A push or add changes a size; replacing an
+ * element in place without changing the size is not noticed (see
+ * port/design/boundary.md).
+ */
+function sameSources(entry: ConfigEntry, context: ResolutionContext): boolean {
+  const {sources, snapshot} = entry;
+  return (
+    sources.sourceExts === context.sourceExts &&
+    sources.assetExts === context.assetExts &&
+    sources.mainFields === context.mainFields &&
+    sources.nodeModulesPaths === context.nodeModulesPaths &&
+    sources.unstable_conditionNames === context.unstable_conditionNames &&
+    sources.unstable_conditionsByPlatform ===
+      context.unstable_conditionsByPlatform &&
+    snapshot.sourceExts.length === context.sourceExts.length &&
+    snapshot.assetExts.length === context.assetExts.size &&
+    snapshot.mainFields.length === context.mainFields.length &&
+    snapshot.nodeModulesPaths.length === context.nodeModulesPaths.length &&
+    snapshot.unstable_conditionNames.length ===
+      context.unstable_conditionNames.length &&
+    snapshot.disableHierarchicalLookup ===
+      (context.disableHierarchicalLookup === true) &&
+    snapshot.preferNativePlatform === (context.preferNativePlatform === true) &&
+    snapshot.unstable_enablePackageExports ===
+      (context.unstable_enablePackageExports === true) &&
+    snapshot.unstable_incrementalResolution ===
+      (context.unstable_incrementalResolution === true)
+  );
+}
+
 function getConfigHandle(
   binding: ResolverBinding,
   context: ResolutionContext,
 ): RustResolverConfig {
+  const first = configHandles[0];
+  if (first != null && sameSources(first, context)) {
+    return first.handle;
+  }
   for (let i = 0; i < configHandles.length; i++) {
     const entry = configHandles[i];
     if (matches(entry.snapshot, context)) {
+      entry.sources = sourcesOf(context);
       if (i !== 0) {
         configHandles.splice(i, 1);
         configHandles.unshift(entry);
@@ -406,7 +470,7 @@ function getConfigHandle(
     unstableEnablePackageExports: snapshot.unstable_enablePackageExports,
     unstableIncrementalResolution: snapshot.unstable_incrementalResolution,
   });
-  configHandles.unshift({snapshot, handle});
+  configHandles.unshift({snapshot, sources: sourcesOf(context), handle});
   if (configHandles.length > MAX_CONFIG_HANDLES) {
     configHandles.pop();
   }
