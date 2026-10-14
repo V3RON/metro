@@ -74,7 +74,27 @@ The context is split in two:
 - **`ResolverConfig`.** Long-lived and built once. It holds the extensions, main fields, conditions, node_modules paths, flags and the host.
 - **The per-call request.** Origin, specifier, platform, `isESMImport`, `allowHaste`, `dev` and `customResolverOptions`.
 
-Package.json values are returned as shared pointers, so a fixture host and a future native file-map replica can both implement the trait without converting anything per call.
+Package.json values are returned as shared pointers (`Arc<serde_json::Value>`, with `preserve_order`), so a fixture host and a future native file-map replica can both implement the trait without converting anything per call.
+
+Host lookups return `Result<_, HostError>`, so a JS-backed host can surface a thrown callback as `ResolveError::Host`, as JS does. `resolve_asset` stays infallible because JS swallows its exceptions.
+
+### Known differences from JS, not covered by fixtures
+
+All of these come from malformed package.json files or odd specifiers. None of them changes a resolution in the bench app.
+
+- **`URL.canParse`** is approximated. It checks scheme syntax and special-scheme hosts, but does no IDNA or IP validation.
+- **Browser-map replacement values** of `true`, a number or an object count as no replacement. JS returns them and then fails with a TypeError.
+- **JS plain-object lookups are not mirrored:**
+  - prototype keys such as a specifier named `constructor`;
+  - the integer-keys-first ordering of object keys.
+- **Inside condition objects,** numbers and booleans reduce to null. JS throws a TypeError there.
+- **`replaceAll('*', match)`** substitutes literally in Rust. JS interprets `$&`-style patterns in the match.
+- **Paths are POSIX only** (`TODO(windows)` in `path.rs`).
+- **`VirtualResolution`** is not modelled.
+
+### Test coverage
+
+Only the 37 cases in `resolver.json` exercise the algorithm from Rust. A mutation check confirmed they catch a broken `.native` extension. The larger JS resolver suites (index-test, package-exports-test and others) are not yet run against Rust. That happens through Jest once the switch is wired. Turning more of them into fixtures with `UPDATE_FIXTURES=1` would give `cargo test` wider coverage before then.
 
 ## Open questions for the boundary decision
 
