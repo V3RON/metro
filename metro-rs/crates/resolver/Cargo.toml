@@ -1,0 +1,11 @@
+[package]
+name = "metro-rs-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Module resolution (port of metro-resolver), pure Rust behind a host trait."
+
+[dependencies]
+# `preserve_order` keeps JSON key order: "exports" condition matching depends on it.
+serde_json = { version = "1", features = ["preserve_order"] }
