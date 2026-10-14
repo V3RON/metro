@@ -25,7 +25,9 @@ import HastePlugin from '../plugins/HastePlugin';
 import {FileProcessor} from './FileProcessor';
 import {FileSystemChangeAggregator} from './FileSystemChangeAggregator';
 import {buildTree, fromCompactFiles} from './RustFileSystem';
+import nodeCrawl from '../crawlers/node';
 import TreeFS from './TreeFS';
+import * as path from 'node:path';
 import {isRustEnabled} from 'metro-rust-switch';
 
 /**
@@ -86,6 +88,14 @@ type Options = Readonly<{
     delta: Delta,
   ) => Promise<FileSystemChangeAggregator>,
   console: Console,
+  // What the JS node crawler needs to repeat the native crawl.
+  crawlOptions: Readonly<{
+    extensions: ReadonlyArray<string>,
+    healthCheckFilePrefix: string,
+    ignorePattern: RegExp,
+    includeSymlinks: boolean,
+    retainAllFiles: boolean,
+  }>,
   fileProcessor: FileProcessor,
   hastePlugin: ?Loose,
   native: Loose,
@@ -202,11 +212,18 @@ export class RustVerifier implements FileSystemVerifier {
     this.#compareState('after initialization');
   }
 
-  // The native file map crawled: the JS side gets the same crawl input.
-  crawled(subpath: ?string): void {
+  // The native file map crawled: the JS node crawler walks the same roots with
+  // the same options, and the files and warnings must be the same. The JS side
+  // then gets the native crawl input.
+  async crawled(
+    subpath: ?string,
+    roots: ReadonlyArray<string>,
+    rustWarnings: ReadonlyArray<string>,
+  ): Promise<void> {
     const {native} = this.#options;
     const tree = this.#getTree();
     const found = fromCompactFiles(native.crawlInput(), 0);
+    await this.#compareCrawl(found, roots, rustWarnings);
     const jsDifference = tree.getDifference(
       found,
       subpath != null ? {subpath} : undefined,
@@ -218,6 +235,58 @@ export class RustVerifier implements FileSystemVerifier {
     };
     this.#compare('crawl difference', rustDifference, jsDifference);
     this.#delta = jsDifference;
+  }
+
+  async #compareCrawl(
+    rustFound: FileData,
+    roots: ReadonlyArray<string>,
+    rustWarnings: ReadonlyArray<string>,
+  ): Promise<void> {
+    const {console, crawlOptions, rootDir} = this.#options;
+    const jsWarnings: Array<string> = [];
+    let jsFound: FileData = new Map();
+    await nodeCrawl({
+      abortSignal: null,
+      computeSha1: false,
+      console: {
+        ...console,
+        // $FlowFixMe[incompatible-type] Only `warn` is used.
+        warn: (message: string) => {
+          jsWarnings.push(message);
+        },
+      },
+      extensions: crawlOptions.extensions,
+      ignore: filePath =>
+        crawlOptions.ignorePattern.test(filePath) ||
+        (!crawlOptions.retainAllFiles &&
+          filePath.includes(path.sep + 'node_modules' + path.sep)) ||
+        path.basename(filePath).startsWith(crawlOptions.healthCheckFilePrefix),
+      includeSymlinks: crawlOptions.includeSymlinks,
+      onStatus: () => {},
+      // The crawler's own difference is not needed: keep what it found.
+      previousState: {
+        clocks: new Map(),
+        fileSystem: {
+          getDifference: (files: FileData) => {
+            jsFound = files;
+            return {changedFiles: new Map(), removedFiles: new Set()};
+          },
+        } as Loose,
+      },
+      rootDir,
+      roots,
+    });
+    // The crawls run in different orders: compare them sorted by path.
+    const sorted = (files: FileData): Map<string, FileMetadata> =>
+      new Map(
+        Array.from(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      );
+    this.#compare('crawl files', sorted(rustFound), sorted(jsFound));
+    this.#compare(
+      'crawl warnings',
+      [...rustWarnings].sort(),
+      jsWarnings.sort(),
+    );
   }
 
   // A JS crawler (Watchman) gave the native file map its delta.

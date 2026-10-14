@@ -631,6 +631,13 @@ export default class FileMap extends EventEmitter {
           applyFileDelta: (fileSystem, filePlugins, delta) =>
             this.#applyFileDelta(fileSystem, filePlugins, delta),
           console: this.#console,
+          crawlOptions: {
+            extensions: options.extensions,
+            healthCheckFilePrefix: options.healthCheck.filePrefix,
+            ignorePattern,
+            includeSymlinks: options.enableSymlinks || false,
+            retainAllFiles: options.retainAllFiles,
+          },
           fileProcessor: this.#fileProcessor,
           hastePlugin,
           native,
@@ -1270,7 +1277,7 @@ export default class FileMap extends EventEmitter {
       summary.changed,
       summary.removed,
     );
-    rust.verifier?.crawled(subpath ?? null);
+    await rust.verifier?.crawled(subpath ?? null, roots, summary.warnings);
     return summary;
   }
 
@@ -1720,8 +1727,8 @@ export default class FileMap extends EventEmitter {
               change.metadata.type === 'l' ? 1 : 0,
             ];
 
+            let ticket;
             try {
-              let ticket;
               let verifyMetadata;
               if (rust != null) {
                 ticket = await this.#processTouchRust(
@@ -1754,6 +1761,11 @@ export default class FileMap extends EventEmitter {
                 verifyMetadata,
               });
             } catch (e) {
+              if (ticket != null && rust != null) {
+                // The native file map keeps the touch under its ticket (verify
+                // mode: the JS side failed after the native side succeeded).
+                rust.native.discardTouch(ticket);
+              }
               if (!['ENOENT', 'EACCESS'].includes(e.code)) {
                 throw e;
               }
