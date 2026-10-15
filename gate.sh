@@ -137,6 +137,12 @@ if want tests; then
   if [ "$PHASE" -ge 4 ]; then
     step tests "HMR session differential (JS vs Rust)" node port/diff/hmr-session.js --phase "$PHASE" || fail tests 20
   fi
+  # From phase 5 (output and server), the dev server answers bundle requests
+  # with bytes assembled in Rust, which the build-based differential does not
+  # exercise: compare the HTTP responses too.
+  if [ "$PHASE" -ge 5 ]; then
+    step tests "HTTP bundle differential (JS vs Rust)" node port/diff/http-bundle.js --phase "$PHASE" || fail tests 20
+  fi
   record tests pass ""
 fi
 
