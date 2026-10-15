@@ -24,5 +24,9 @@ if (!fs.existsSync(source)) {
   process.stderr.write(`Expected cargo to have built ${source}\n`);
   process.exit(1);
 }
+// Replace the file instead of writing over it: macOS caches a loaded
+// library's code signature per file, and kills a process that loads a library
+// rewritten in place (SIGKILL on require).
+fs.rmSync(target, {force: true});
 fs.copyFileSync(source, target);
 process.stdout.write(`metro-rs: wrote ${path.relative(process.cwd(), target)}\n`);
