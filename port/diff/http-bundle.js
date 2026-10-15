@@ -15,10 +15,13 @@
  * same path and on the same port for both sides, and fetches these URLs:
  *
  *   ios dev, ios dev lazy, modulesOnly without running the module,
- *   inlineSourceMap, android production,
+ *   inlineSourceMap, android production, then the source map of the first one
+ *   (`.map`, which from phase 5 the server sends as a Buffer built by Rust)
+ *   with and without `excludeSource`,
  *
  * then edits a leaf module (like the `edit` scenario of the benchmark), waits
- * until the server answers with the edit, and fetches the first URL again.
+ * until the server answers with the edit, and fetches the first URL and its
+ * source map again.
  * Both sides share one transform cache, as the other differentials do; the
  * file-map cache is fresh for each. The Content-Length of every response must
  * be the length of its body.
@@ -57,7 +60,12 @@ const URLS = [
   `${FIRST}&modulesOnly=true&runModule=false`,
   `${FIRST}&inlineSourceMap=true`,
   '/index.bundle?platform=android&dev=false&minify=false',
+  '/index.map?platform=ios&dev=true&minify=false',
+  '/index.map?platform=ios&dev=true&minify=false&excludeSource=true',
 ];
+// Fetched again after the edit.
+const FIRST_MAP = '/index.map?platform=ios&dev=true&minify=false';
+const AFTER_EDIT = [FIRST, FIRST_MAP];
 const LEAF = 'src/feature19/Comp1499.tsx';
 const MARKER = 'httpBundleEdit';
 
@@ -151,7 +159,9 @@ async function child() {
       if (Date.now() > deadline) throw new Error('the edit never reached the bundle');
       await sleep(100);
     }
-    await fetchTo(FIRST, `${URLS.length}.js`);
+    for (const [k, urlPath] of AFTER_EDIT.entries()) {
+      await fetchTo(urlPath, `${URLS.length + k}.js`);
+    }
   } finally {
     fs.writeFileSync(leaf, original);
     if (httpServer) {
@@ -220,8 +230,8 @@ async function main() {
   }
 
   let failed = false;
-  for (let i = 0; i <= URLS.length; i++) {
-    const url = URLS[i] ?? `${FIRST} (after the edit)`;
+  for (let i = 0; i < URLS.length + AFTER_EDIT.length; i++) {
+    const url = URLS[i] ?? `${AFTER_EDIT[i - URLS.length]} (after the edit)`;
     const a = fs.readFileSync(path.join(dirA, `${i}.js`));
     const b = fs.readFileSync(path.join(dirB, `${i}.js`));
     if (a.equals(b)) {
@@ -239,7 +249,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  console.log(`HTTP bundle differential: passed (${URLS.length + 1} responses identical${selfTest ? ', JS against JS' : ''}).`);
+  console.log(`HTTP bundle differential: passed (${URLS.length + AFTER_EDIT.length} responses identical${selfTest ? ', JS against JS' : ''}).`);
 }
 
 (flag('child') ? child() : main()).then(
