@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const {createProject, startServer, fetchFresh, execBundle, waitFor} = require('../helpers/project');
+const {createProject, execBundle, fetchFresh, startServer, waitFor} = require('../helpers/project');
 
 jest.useRealTimers();
 jest.setTimeout(120000);
@@ -152,7 +152,7 @@ describe('graph topology through the dev server', () => {
     await start({
       'index.js': "global.result = 'i' + require('./shared').v;",
       'other.js': "global.result = 'o' + require('./shared').v;",
-      'shared.js': "exports.v = 1;",
+      'shared.js': 'exports.v = 1;',
     });
     const other = '/other.bundle?platform=ios&dev=true&minify=false';
     expect(await value(other)).toBe('o1');
