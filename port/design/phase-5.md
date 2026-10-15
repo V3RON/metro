@@ -6,7 +6,7 @@
 
 On 2026-10-15 at 07:34 UTC Szymon chose "Code now" on the card "Start phase 5 code before you approve phase 4?". RULES.md §2 says not to start the next phase before approval, so this is a one-time exception:
 
-- **Branch:** `port/phase-5` is branched from `port/phase-4` at `569d83db4`, which is not yet approved.
+- **Branch:** `port/phase-5` is branched from `port/phase-4`, which is not yet approved. It was rebased onto the phase 4 report commit `34fd43fe9`. Phase 4's PR is V3RON/metro#8.
 - **Rebase:** if phase 4's review changes anything, this branch is rebased onto the result.
 - **Gate:** the gate refuses `--phase 5` until phase 4 is approved, and nobody works around that. Until then we run targeted Jest and cargo tests and the differentials directly.
 - **`port/approvals/`** is not touched.
@@ -28,27 +28,32 @@ On 2026-10-15 at 07:34 UTC Szymon chose "Code now" on the card "Start phase 5 co
 
 ## Where we start from
 
-Cloud numbers measured so far (medians):
+From the phase 4 report (`port/reports/phase-4.md`, `./gate.sh --report` at `569d83d`, cloud runner, medians of 5 interleaved runs):
 
-| Scenario | Pure JS | Rust | Speed-up | Measured at |
-|---|---:|---:|---:|---|
-| warm-build | about 3290 ms | about 1515 ms | about 2.17× | step 3; the step 4 cloud number is in phase 4's report |
-| edit | 253 ms | 236 ms | 1.07× | phase 3 report |
-| cold-filemap | 2795 ms | 2213 ms | 1.26× | phase 3 report; phase 4 should have lowered it |
+| Scenario | Pure JS | Phase 4 | Speed-up | Noise | Phase 5 target | Phase 5 ms | Still to remove |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| warm-build | 3504 ms | 1805 ms | 1.94× | ±16.2% | 2.5× | 1402 ms | about 400 ms |
+| edit | 305 ms | 293 ms | 1.04× | ±5.5% | 1.5× | 203 ms | about 90 ms |
+| cold-filemap | 3504 ms | 1929 ms | 1.82× | ±5.4% | 2.0× | 1752 ms | about 180 ms |
 
-Distance to each target:
+The "Phase 5 ms" column is the time each target allows, assuming the JS baseline stays where it is.
 
-- **warm-build 2.5×** needs about 1316 ms, so about **200 ms more** has to go.
-  - The phase 4 cloud profile put serialisation at 226 ms, and the source re-reads for source maps (`module.getSource()`, a sync `readFileSync` per module) show up separately.
-  - That puts the target within reach if serialisation and the source reads move off the JS thread. It is not certain; to be confirmed with the cloud profile at the phase 4 head.
-- **edit 1.5×** needs about 170 ms against JS's 253 ms. Phase 4 owned about 2 ms of an edit, so nearly all of an edit is phase 5's:
-  - the delta calculation;
-  - `hmrJSBundle` serialisation;
-  - the WebSocket send;
-  - the server's bundle-request path.
+- **warm-build:** about 400 ms has to go, out of 1805.
+  - The phase 4 cloud profile put serialisation at about 226 ms, before the source reads for `sourcesContent` (`module.getSource()`, a sync `readFileSync` per module).
+  - Serialisation plus those reads is the largest single piece phase 5 owns. Moving all of it off the JS thread may still fall short of 400 ms on its own.
+  - The rest has to come from what the server does around a build:
+    - the `getSortedModules` sort;
+    - building `bundleOptions`;
+    - module ids (`createModuleId` per module, for every serialisation);
+    - GC pressure from about 30 MB of transform output being copied into strings (rule 10).
+  - **Reachable but not certain.** The cloud profile decides.
+- **edit:** 90 ms has to go out of 293 ms. Phase 4 owned about 2 ms of an edit, so the rest is:
+  - file-change notification and the delta calculation, which wait on the watcher;
+  - `hmrJSBundle`: `wrapModule`, the inverse dependencies, `addParamsToDefineCall`;
+  - JSON and WebSocket sends.
 
-  This needs the cloud edit profile before anyone can say whether 1.5× is reachable.
-- **cold-filemap 2×** needs about 1400 ms in JS terms. That is warm-build plus the cold crawl plus lazily hashing the graph's 2,741 files. If warm-build reaches about 1.3 s, the cold extras (about 0.2–0.4 s) make 2× borderline. **Risk flagged early.**
+  How much of the 293 ms is waiting on the watcher (a debounce, fixed time) decides whether 1.5× is reachable at all. **Unknown until the cloud edit profile.**
+- **cold-filemap:** 180 ms has to go. It shares the build and serialisation path with warm-build, so it follows warm-build's gains. Since phase 4 it is 124 ms slower than warm-build, which is the cold crawl and hashing. **Likely if warm-build gets there.**
 
 ## Mac CPU profile at the phase 4 head (Mac only, inflated by load and profiling)
 
@@ -99,20 +104,24 @@ What this says:
 
 ## Tests first
 
-- **Existing coverage:**
-  - `port/blackbox/__tests__/server-endpoints-test.js`;
-  - `port/blackbox/__tests__/cli-and-build-output-test.js`;
-  - `port/blackbox/__tests__/hmr-protocol-test.js`;
-  - the bundle and HMR differentials.
-- **Gaps to fill in JS before any Rust:**
-  - source-map requests with and without `excludeSource`;
-  - `inlineSourceMap`;
-  - `sourceUrl` and `sourcePaths` options;
-  - lazy and async bundles (`baseJSBundleWithLazyModuleDefinition`);
-  - asset requests;
-  - `customSerializer` falling back to JS;
-  - `writeBundle` output files.
-- **The differential:** `port/diff/differential.js` gains cases for an inline source map and an `excludeSource` map.
+**Existing coverage:**
+
+- `server-endpoints-test.js`, `cli-and-build-output-test.js`, `hmr-protocol-test.js`, `incremental-rebuild-test.js`;
+- the bundle differential and the HMR differential (`port/diff/`).
+
+**Added for phase 5, in JS, before any Rust.** Every case passes with `METRO_RUST=off` and with the phase 4 components in Rust.
+
+- **`serializer-output-test.js`, 21 tests:**
+  - every `serializer.*` hook (`getPolyfills`, `polyfillModuleNames`, `getModulesRunBeforeMainModule`, `getRunModuleStatement`, `processModuleFilter`, `createModuleIdFactory`, `customSerializer` returning a string or `{code, map}`, `isThirdPartyModule` → `x_google_ignoreList`, `experimentalSerializerHook`);
+  - runBuild source maps: absolute sources, `sourcesContent` exactly as on disk (including non-ASCII text and CRLF), external and inline maps;
+  - server URL options: `sourcePaths=url-server`, `lazy`, `shallow`, `modulesOnly` with `runModule=false`;
+  - `bundleOut` and `sourceMapOut`.
+- **`hmr-update-payload-test.js`, 2 tests:** the exact define call of an HMR update, including the inverse-dependency chain up to the entry point, and the per-module source and map URLs (path encoding, the JSC-safe form, `excludeSource` dropped, the modules-only and shallow options added).
+- **`output-save-test.js`, 5 tests:** `metro/private/shared/output/bundle`'s `save`, the module React Native's CLI writes bundles with: `sourcemapSourcesRoot`, `bundleEncoding`, its log lines, a missing directory.
+
+**Quirk pinned as it is:** `excludeSource=true` does not apply to an inline source map (`inlineSourceMap=true`). The bundle serializer builds that map and ignores the option, so only the `.map` endpoint honours it.
+
+**Still to add:** the inline map and `excludeSource` cases in `port/diff/differential.js`, alongside the Rust work for steps 1 to 3.
 
 ## Verify mode
 
