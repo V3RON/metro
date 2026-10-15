@@ -90,22 +90,73 @@ type NewEntry = {
 
 type Result = {buffer: Buffer, ascii: boolean, failed: Array<number>};
 
-// What a call gives: the bytes, whether they are all ASCII, and the string if
-// the JavaScript implementation made it.
-type Built = {buffer: Buffer, ascii: boolean, string: ?string};
+// What a call gives: the bytes, or the string (when the call asked for a
+// string, or the JavaScript implementation made it).
+type Built = {buffer: ?Buffer, string: ?string};
 
-let builder: ?Loose = null;
-// Output data -> token of the entry Rust holds for it.
-let tokens: WeakMap<interface {}, number> = new WeakMap();
-// Tokens of collected outputs, to be dropped by Rust with the next call.
-let pendingEvictions: Array<number> = [];
-const registry: FinalizationRegistry<number> = new FinalizationRegistry(
-  token => {
-    pendingEvictions.push(token);
-  },
-);
 // Tokens are never reused within a process.
 let lastToken = 0;
+
+// The caches that exist now (for tests and the memory check).
+const liveCaches: Set<RustSourceMapCache> = new Set();
+
+/**
+ * What Rust holds for module outputs, and how JavaScript knows. Only the dev
+ * server's `.map` responses keep one (per Server, dropped by `dispose()` in
+ * `Server.end()`): there the same outputs come back request after request.
+ * Every other call gets a one-shot cache: all entries are sent, nothing is
+ * remembered on either side, and `dispose()` empties Rust's at the end of the
+ * call, synchronously.
+ */
+export class RustSourceMapCache {
+  retained: boolean;
+  builder: ?Loose = null;
+  // Output data -> token of the entry Rust holds for it (retained only).
+  tokens: WeakMap<interface {}, number> = new WeakMap();
+  // Tokens of collected outputs, to be dropped by Rust with the next call.
+  pendingEvictions: Array<number> = [];
+  registry: ?FinalizationRegistry<number> = null;
+
+  constructor(retained: boolean) {
+    this.retained = retained;
+    if (retained) {
+      this.registry = new FinalizationRegistry(token => {
+        this.pendingEvictions.push(token);
+      });
+    }
+    liveCaches.add(this);
+  }
+
+  getBuilder(): Loose {
+    if (this.builder == null) {
+      this.builder = new (loadRustBinding() as Loose).IndexMapBuilder();
+    }
+    return this.builder;
+  }
+
+  /** Starts again: Rust holds nothing JavaScript believes it does. */
+  reset(): void {
+    this.builder?.clear();
+    this.builder = null;
+    this.tokens = new WeakMap();
+    this.pendingEvictions = [];
+  }
+
+  /** Empties what Rust holds, now. The cache can be used again. */
+  dispose(): void {
+    this.reset();
+    liveCaches.delete(this);
+  }
+}
+
+/** How many caches exist and how many entries Rust holds in them. */
+export function rustSourceMapStats(): {caches: number, entries: number} {
+  let entries = 0;
+  for (const cache of liveCaches) {
+    entries += cache.builder?.held() ?? 0;
+  }
+  return {caches: liveCaches.size, entries};
+}
 
 /**
  * Whether index source maps are written in Rust: the `serializers` component
@@ -134,20 +185,6 @@ function isVerifyEnabled(): boolean {
     lastVerifyValue = verify;
   }
   return lastVerify;
-}
-
-function getBuilder(): Loose {
-  if (builder == null) {
-    builder = new (loadRustBinding() as Loose).IndexMapBuilder();
-  }
-  return builder;
-}
-
-/** Starts again: Rust holds nothing JavaScript believes it does. */
-function reset(): void {
-  builder = null;
-  tokens = new WeakMap();
-  pendingEvictions = [];
 }
 
 function nextToken(): number {
@@ -226,6 +263,7 @@ function describe(data: Loose, path: unknown): NewEntry {
 function prepare(
   infos: ReadonlyArray<ModuleInfo>,
   options: SourceMapGeneratorOptions,
+  cache: RustSourceMapCache,
 ): ?{request: Loose, newEntries: Array<NewEntry>} {
   try {
     const pending: Map<interface {}, NewEntry> = new Map();
@@ -233,7 +271,7 @@ function prepare(
     const entryTokens = new Uint32Array(infos.length);
     for (let i = 0; i < infos.length; i++) {
       const {data, path} = infos[i];
-      let token = tokens.get(data);
+      let token = cache.tokens.get(data);
       if (token == null) {
         let entry = pending.get(data);
         if (entry == null) {
@@ -264,7 +302,7 @@ function prepare(
     }
     const newEntries = [...pending.values()];
     return {
-      request: makeRequest(infos, entryTokens, newEntries, options),
+      request: makeRequest(infos, entryTokens, newEntries, options, cache),
       newEntries,
     };
   } catch {
@@ -279,6 +317,7 @@ function makeRequest(
   entryTokens: Uint32Array,
   newEntries: ReadonlyArray<NewEntry>,
   options: SourceMapGeneratorOptions,
+  cache: RustSourceMapCache,
 ): Loose {
   const flags = new Uint8Array(infos.length);
   const paths: Array<string> = [];
@@ -311,7 +350,7 @@ function makeRequest(
     newMappings: newEntries.map(e => e.mappings),
     newNames: newEntries.map(e => e.names),
     newFunctionMaps: newEntries.map(e => e.functionMap),
-    evict: Uint32Array.from(pendingEvictions),
+    evict: Uint32Array.from(cache.pendingEvictions),
   };
 }
 
@@ -319,11 +358,17 @@ function makeRequest(
  * Records what Rust now holds. Called right after the call that sent the
  * entries and the evictions, in the same synchronous stretch.
  */
-function commit(newEntries: ReadonlyArray<NewEntry>): void {
-  pendingEvictions = [];
+function commit(
+  cache: RustSourceMapCache,
+  newEntries: ReadonlyArray<NewEntry>,
+): void {
+  if (!cache.retained) {
+    return;
+  }
+  cache.pendingEvictions = [];
   for (const entry of newEntries) {
-    tokens.set(entry.data, entry.token);
-    registry.register(entry.data, entry.token);
+    cache.tokens.set(entry.data, entry.token);
+    cache.registry?.register(entry.data, entry.token);
   }
 }
 
@@ -346,28 +391,23 @@ function fallback(
   const string = fromRawMappingsIndexed(modules).toString(undefined, {
     excludeSource: options.excludeSource,
   });
-  return {buffer: Buffer.from(string, 'utf8'), ascii: false, string};
+  return {buffer: null, string};
 }
 
-/** Sends the request; calls `fallback` when the build left files unread. */
-function afterBuild(
-  result: Result,
-  infos: ReadonlyArray<ModuleInfo>,
-  options: SourceMapGeneratorOptions,
-): Built {
-  return result.failed.length === 0
-    ? {buffer: result.buffer, ascii: result.ascii, string: null}
-    : fallback(infos, options);
-}
-
-function stringOf(built: Built): string {
-  return built.string ?? built.buffer.toString(built.ascii ? 'latin1' : 'utf8');
+function bytesOf(built: Built): Buffer {
+  return built.buffer ?? Buffer.from(String(built.string), 'utf8');
 }
 
 function verify(built: Built, js: string): void {
+  if (built.string != null && built.buffer == null && built.string === js) {
+    return;
+  }
   const expected = Buffer.from(js, 'utf8');
-  const actual = built.buffer;
-  if (expected.equals(actual) && stringOf(built) === js) {
+  const actual = bytesOf(built);
+  if (
+    expected.equals(actual) &&
+    (built.string == null || built.string === js)
+  ) {
     return;
   }
   let offset = 0;
@@ -417,79 +457,116 @@ function gatherNonBlocking(
   });
 }
 
-function build(
+/** The result of the Rust call: a string, or the failed module indices. */
+function builtOf(
+  result: Result | string | Array<number>,
   infos: ReadonlyArray<ModuleInfo>,
   options: SourceMapGeneratorOptions,
 ): Built {
-  const prepared = prepare(infos, options);
+  if (typeof result === 'string') {
+    return {buffer: null, string: result};
+  }
+  if (Array.isArray(result)) {
+    // Files Rust could not read.
+    return fallback(infos, options);
+  }
+  return result.failed.length === 0
+    ? {buffer: result.buffer, string: null}
+    : fallback(infos, options);
+}
+
+function build(
+  infos: ReadonlyArray<ModuleInfo>,
+  options: SourceMapGeneratorOptions,
+  cache: RustSourceMapCache,
+  wantString: boolean,
+): Built {
+  const prepared = prepare(infos, options, cache);
   if (prepared == null) {
     return fallback(infos, options);
   }
   let result;
   try {
-    result = getBuilder().build(prepared.request);
+    const builder = cache.getBuilder();
+    result = wantString
+      ? builder.buildString(prepared.request)
+      : builder.build(prepared.request);
   } catch (error) {
-    reset();
+    cache.reset();
     throw error;
   }
-  commit(prepared.newEntries);
-  return afterBuild(result, infos, options);
+  commit(cache, prepared.newEntries);
+  return builtOf(result, infos, options);
 }
 
 async function buildNonBlocking(
   infos: ReadonlyArray<ModuleInfo>,
   options: SourceMapGeneratorOptions,
+  cache: RustSourceMapCache,
+  wantString: boolean,
 ): Promise<Built> {
-  const prepared = prepare(infos, options);
+  const prepared = prepare(infos, options, cache);
   if (prepared == null) {
     return fallback(infos, options);
   }
   let promise;
   try {
-    promise = getBuilder().buildAsync(prepared.request);
+    const builder = cache.getBuilder();
+    promise = wantString
+      ? builder.buildStringAsync(prepared.request)
+      : builder.buildAsync(prepared.request);
   } catch (error) {
-    reset();
+    cache.reset();
     throw error;
   }
-  commit(prepared.newEntries);
+  commit(cache, prepared.newEntries);
   let result;
   try {
     result = await promise;
   } catch (error) {
-    reset();
+    cache.reset();
     throw error;
   }
-  return afterBuild(result, infos, options);
+  return builtOf(result, infos, options);
 }
 
 /**
  * `sourceMapString(modules, options)` with the map written in Rust. The
- * result is the same string. When every byte is ASCII the string is made with
- * `latin1`, which is much cheaper than decoding UTF-8.
+ * string is made by Rust (latin1 when all ASCII) and Rust holds nothing
+ * afterwards.
  */
 export function rustSourceMapString(
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
 ): string {
-  const built = build(gather(modules, options), options);
-  if (isVerifyEnabled()) {
-    verify(
-      built,
-      sourceMapGenerator(modules, options).toString(undefined, {
-        excludeSource: options.excludeSource,
-      }),
-    );
+  const cache = new RustSourceMapCache(false);
+  try {
+    const built = build(gather(modules, options), options, cache, true);
+    if (isVerifyEnabled()) {
+      verify(
+        built,
+        sourceMapGenerator(modules, options).toString(undefined, {
+          excludeSource: options.excludeSource,
+        }),
+      );
+    }
+    return String(built.string);
+  } finally {
+    cache.dispose();
   }
-  return stringOf(built);
 }
 
 async function builtNonBlocking(
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
+  cache: RustSourceMapCache,
+  wantString: boolean,
 ): Promise<Built> {
   const built = await buildNonBlocking(
     await gatherNonBlocking(modules, options),
     options,
+    cache,
+    wantString,
   );
   if (isVerifyEnabled()) {
     const generator = await sourceMapGeneratorNonBlocking(modules, options);
@@ -505,13 +582,31 @@ export async function rustSourceMapStringNonBlocking(
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
 ): Promise<string> {
-  return stringOf(await builtNonBlocking(modules, options));
+  const cache = new RustSourceMapCache(false);
+  try {
+    const built = await builtNonBlocking(modules, options, cache, true);
+    return String(built.string);
+  } finally {
+    cache.dispose();
+  }
 }
 
-/** The map's bytes, for the dev server's `.map` response. */
+/**
+ * The map's bytes, for the dev server's `.map` response. With the server's
+ * `cache` the entries stay in Rust for the next request; without one the call
+ * is one-shot.
+ */
 export async function rustSourceMapBufferNonBlocking(
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
+  cache?: ?RustSourceMapCache,
 ): Promise<Buffer> {
-  return (await builtNonBlocking(modules, options)).buffer;
+  const used = cache ?? new RustSourceMapCache(false);
+  try {
+    return bytesOf(await builtNonBlocking(modules, options, used, false));
+  } finally {
+    if (cache == null) {
+      used.dispose();
+    }
+  }
 }

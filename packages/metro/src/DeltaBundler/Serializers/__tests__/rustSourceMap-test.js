@@ -16,7 +16,9 @@ import type {Module} from '../../types';
 import CountingSet from '../../../lib/CountingSet';
 import {tagSourceFile} from '../../sourceFileTag';
 import {
+  RustSourceMapCache,
   rustSourceMapBufferNonBlocking,
+  rustSourceMapStats,
   rustSourceMapString,
   rustSourceMapStringNonBlocking,
 } from '../rustSourceMap';
@@ -138,7 +140,7 @@ describe('rustSourceMapString', () => {
   });
 
   test('is written by Rust, and JavaScript runs only for what Rust does not take', () => {
-    const build = jest.spyOn(binding.IndexMapBuilder.prototype, 'build');
+    const build = jest.spyOn(binding.IndexMapBuilder.prototype, 'buildString');
     try {
       rustSourceMapString(
         [
@@ -462,6 +464,35 @@ describe('rustSourceMapStringNonBlocking and rustSourceMapBufferNonBlocking', ()
   });
 });
 
+describe('what Rust holds', () => {
+  const modules = () => [
+    makeModule('/root/a.js', 'one', {map: TUPLES}),
+    makeModule('/root/b.js', 'x', {map: vlqMapFromTuples(TUPLES)}),
+  ];
+
+  test('one-shot calls leave nothing in Rust', async () => {
+    const before = rustSourceMapStats();
+    rustSourceMapString(modules(), options());
+    await rustSourceMapStringNonBlocking(modules(), options());
+    await rustSourceMapBufferNonBlocking(modules(), options());
+    expect(rustSourceMapStats()).toEqual(before);
+  });
+
+  test('a server cache keeps entries across requests until it is disposed', async () => {
+    const cache = new RustSourceMapCache(true);
+    const mods = modules();
+    const first = await rustSourceMapBufferNonBlocking(mods, options(), cache);
+    expect(rustSourceMapStats().entries).toBeGreaterThanOrEqual(2);
+    const second = await rustSourceMapBufferNonBlocking(mods, options(), cache);
+    expect(second.equals(first)).toBe(true);
+    expect(first.equals(Buffer.from(jsMap(mods, options()), 'utf8'))).toBe(
+      true,
+    );
+    cache.dispose();
+    expect(rustSourceMapStats().entries).toBe(0);
+  });
+});
+
 describe('IndexMapBuilder', () => {
   const entry = (token: number) => ({
     newTokens: new Uint32Array([token]),
@@ -519,6 +550,40 @@ describe('IndexMapBuilder', () => {
       }),
     );
     expect(builder.held()).toBe(1);
+  });
+
+  test('clear drops every entry', () => {
+    const builder = new binding.IndexMapBuilder();
+    builder.build(request(1, entry(1)));
+    expect(builder.held()).toBe(1);
+    builder.clear();
+    expect(builder.held()).toBe(0);
+  });
+
+  test('buildString gives the string of the bytes, latin1 or UTF-8', () => {
+    const builder = new binding.IndexMapBuilder();
+    const bytes = builder.build(request(1, entry(1)));
+    expect(builder.buildString(request(1))).toBe(
+      bytes.buffer.toString('latin1'),
+    );
+    expect(
+      builder.buildString(
+        request(1, {
+          flags: new Uint8Array([2 << 1]),
+          literals: ['"é\\ud83d\\ude00"'],
+          excludeSource: false,
+        }),
+      ),
+    ).toContain('sourcesContent');
+    expect(
+      builder.buildString(
+        request(1, {
+          flags: new Uint8Array([MODE_FILE << 1]),
+          files: [path.join(directory, 'does-not-exist.js')],
+          excludeSource: false,
+        }),
+      ),
+    ).toEqual([0]);
   });
 
   test('the async build gives the same bytes', async () => {

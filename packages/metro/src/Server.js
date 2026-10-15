@@ -57,7 +57,10 @@ import {
   sourceMapBufferNonBlocking,
   sourceMapStringNonBlocking,
 } from './DeltaBundler/Serializers/sourceMapString';
-import {isRustSourceMapEnabled} from './DeltaBundler/Serializers/rustSourceMap';
+import {
+  isRustSourceMapEnabled,
+  RustSourceMapCache,
+} from './DeltaBundler/Serializers/rustSourceMap';
 import IncrementalBundler from './IncrementalBundler';
 import ResourceNotFoundError from './IncrementalBundler/ResourceNotFoundError';
 import {calculateBundleProgressRatio} from './lib/bundleProgressUtils';
@@ -152,6 +155,7 @@ export default class Server {
   _config: ConfigT;
   _createModuleId: (path: string) => number;
   _isEnded: boolean;
+  _sourceMapCache: ?RustSourceMapCache;
   _logger: typeof Logger;
   _nextBundleBuildNumber: number;
   _platforms: Set<string>;
@@ -189,6 +193,7 @@ export default class Server {
       this._bundler.getBundler().getDynamicRoots(),
     );
     this._isEnded = false;
+    this._sourceMapCache = null;
     this._fetchTimings = [];
     this._activeFetchCount = 0;
 
@@ -207,6 +212,9 @@ export default class Server {
   async end() {
     if (!this._isEnded) {
       await this._bundler.end();
+      // Rust's per-module entries for `.map` responses go with the server.
+      this._sourceMapCache?.dispose();
+      this._sourceMapCache = null;
       this._isEnded = true;
     }
   }
@@ -1332,7 +1340,14 @@ export default class Server {
       const modules = [...prepend, ...this._getSortedModules(graph)];
       if (isRustSourceMapEnabled(sourceMapOptions)) {
         // The bytes, written by Rust: no string of the whole map is made.
-        return await sourceMapBufferNonBlocking(modules, sourceMapOptions);
+        // The cache lives as long as this server: the same module outputs
+        // come back with every request.
+        this._sourceMapCache ??= new RustSourceMapCache(true);
+        return await sourceMapBufferNonBlocking(
+          modules,
+          sourceMapOptions,
+          this._sourceMapCache,
+        );
       }
       return await sourceMapStringNonBlocking(modules, sourceMapOptions);
     },

@@ -10,6 +10,7 @@
  */
 
 import type {Module} from '../types';
+import type {RustSourceMapCache} from './rustSourceMap';
 import type {SourceMapGeneratorOptions} from './sourceMapGenerator';
 
 import {
@@ -56,9 +57,10 @@ async function sourceMapStringNonBlocking(
 async function sourceMapBufferNonBlocking(
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
+  cache?: ?RustSourceMapCache,
 ): Promise<Buffer> {
   if (isRustSourceMapEnabled(options)) {
-    return rustSourceMapBufferNonBlocking(modules, options);
+    return rustSourceMapBufferNonBlocking(modules, options, cache);
   }
   return Buffer.from(
     await sourceMapStringNonBlocking(modules, options),
