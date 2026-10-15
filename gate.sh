@@ -106,7 +106,13 @@ if want compile; then
     echo "FAILED: there is no Rust workspace. Phase 0 must create metro-rs/ (see RULES.md, 'Repository layout')."
     fail compile 10
   fi
-  step compile "flow" yarn --silent typecheck || fail compile 10
+  FLOW_OK=1
+  step compile "flow" yarn --silent typecheck || FLOW_OK=0
+  # Flow 0.335 leaves a server daemon running after `flow check` on macOS
+  # (one grew to 29 GB); stop it whether or not the check passed. This does
+  # not change what the gate checks.
+  ./node_modules/.bin/flow stop > /dev/null 2>&1 || true
+  [ "$FLOW_OK" = 1 ] || fail compile 10
   step compile "eslint" yarn --silent lint --quiet || fail compile 10
   record compile pass ""
 fi
