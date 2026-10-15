@@ -223,8 +223,16 @@ async function child() {
   const recorded = [];
   let httpServer;
   let ws;
+  let resolveClosed = () => {};
+  const closed = new Promise(r => (resolveClosed = r));
   try {
-    ({httpServer} = await Metro.runServer(config, {host: '127.0.0.1', watch: true}));
+    ({httpServer} = await Metro.runServer(config, {
+      host: '127.0.0.1',
+      watch: true,
+      // Called once Metro has ended everything, including its transform
+      // workers. The child waits for it, so no worker outlives it.
+      onClose: () => resolveClosed(),
+    }));
     log(`dev server on port ${port} (METRO_RUST=${process.env.METRO_RUST})`);
 
     // The graph must exist before a client can register for it (this is what
@@ -277,7 +285,10 @@ async function child() {
     try {
       ws?.terminate();
     } catch {}
-    if (httpServer) await new Promise(r => httpServer.close(r));
+    if (httpServer) {
+      httpServer.close();
+      await closed;
+    }
   }
 }
 
@@ -503,8 +514,11 @@ async function main() {
     }
     console.log(`HMR session differential: passed (${sa.total} messages identical${selfTest ? ', JS against JS' : ''}).`);
   } finally {
-    fs.rmSync(APP_COPY, {recursive: true, force: true});
-    fs.rmSync(path.join(WORK, 'filemap-cache'), {recursive: true, force: true});
+    // Retries cover a process that is still writing as it exits (e.g. a
+    // Babel register cache under node_modules/.cache).
+    const rm = target => fs.rmSync(target, {recursive: true, force: true, maxRetries: 10, retryDelay: 200});
+    rm(APP_COPY);
+    rm(path.join(WORK, 'filemap-cache'));
   }
 }
 
