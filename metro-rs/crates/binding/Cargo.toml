@@ -18,6 +18,7 @@ metro-rs-file-store = { path = "../file-store" }
 metro-rs-file-map = { path = "../file-map" }
 metro-rs-haste = { path = "../haste" }
 metro-rs-graph = { path = "../graph" }
+metro-rs-serializer = { path = "../serializer" }
 metro-rs-resolver = { path = "../resolver" }
 napi = { version = "2", default-features = false, features = ["napi3"] }
 napi-derive = "2"

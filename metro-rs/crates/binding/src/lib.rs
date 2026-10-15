@@ -16,6 +16,7 @@ use napi_derive::napi;
 pub mod file_map;
 pub mod graph;
 pub mod resolver;
+pub mod serializer;
 pub mod transform_cache;
 
 /// Version of the Rust core.

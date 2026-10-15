@@ -1,0 +1,9 @@
+[package]
+name = "metro-rs-serializer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Assembles a JS bundle's bytes from module code held in Rust (the bundle part of Metro's serializers), pure Rust."
+
+[dependencies]

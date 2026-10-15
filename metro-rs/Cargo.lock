@@ -207,6 +207,7 @@ dependencies = [
  "metro-rs-graph",
  "metro-rs-haste",
  "metro-rs-resolver",
+ "metro-rs-serializer",
  "metro-rs-source-map",
  "napi",
  "napi-build",
@@ -272,6 +273,10 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
 ]
+
+[[package]]
+name = "metro-rs-serializer"
+version = "0.1.0"
 
 [[package]]
 name = "metro-rs-source-map"
