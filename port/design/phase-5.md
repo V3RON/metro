@@ -135,6 +135,61 @@ Outside phase 5 are the Babel transform of the edited file (71 ms) and the bench
 5. **HMR, assets and the server's remaining paths** (`hmr`, `assets`, `server`), only where a measurement shows a cost. `hmrJSBundle` is 0.05 ms, so it stays JS unless something changes.
 6. **Re-measure what was kept in JS for speed** (RULES.md §7): BundleBuilder, metro-core `canonicalize`, the JS `ob1`.
 
+## Step 1 as built
+
+Commits `46dac3a97`, `c3d3a7647` and `5357fec78`.
+
+**Rust:**
+- **The `metro-rs-serializer` crate:** a `ModuleStore` maps a token to the module's code as UTF-8, with the byte position of its last `)` and its UTF-16 length.
+- **`assemble`:** reproduces `bundleToString(baseJSBundle(...))` from a list of entries in module id order. Each entry is either a token plus its `__d(...)` parameters, or a literal that JS wrapped.
+- **The napi class `BundleAssembler`:** one per graph, with one `assemble` call per request (rule 2). It receives:
+  - the pre and post code;
+  - a token per entry;
+  - all parameters joined by NUL;
+  - the codes Rust doesn't hold yet;
+  - the literals.
+
+  It returns a Buffer and the UTF-16 length. Codes the call didn't use are dropped afterwards.
+
+**JS:** `rustBundle.js` follows `baseJSBundle` step by step, including the order of the `createModuleId` and `processModuleFilter` calls, which user hooks can observe.
+- Tokens are keyed by the code string, so they are correct by construction.
+- JS mirrors Rust's eviction, so only new codes cross: on an edit, one module.
+- A module whose code has no `)` is wrapped by JS and sent as a literal.
+- `customSerializer` and `unstable_inlineDependencyMap` keep the JS path.
+
+**Server:** only the `.bundle` response changed.
+- It sends the Buffer, with `Content-Length` from the buffer.
+- The perf logger's `bundle_length` gets the UTF-16 length Rust computed.
+- `runBuild`, `Server.build` and `.map` are unchanged.
+
+**Checks:**
+- `METRO_RUST_VERIFY=serializers` compares against the JS bytes and length.
+- `port/diff/http-bundle.js` runs in the tests gate from phase 5. It compares six HTTP responses between JS and Rust: ios dev, lazy, modules only, an inline map, android production, and ios dev again after an edit.
+- napi converts lone surrogates to U+FFFD, the same bytes as `Buffer.from`.
+
+**Cloud quick perf at `822fd3c` (one run each):**
+
+| Scenario | JS | Rust | Speed-up | Target |
+|---|---:|---:|---:|---|
+| warm-build | 3749 ms | 1651 ms | 2.27× | 2.5×, not met yet |
+| edit | 317 ms | 195 ms | 1.63× | 1.5×, met |
+| cold-filemap | 4860 ms | 2273 ms | 2.14× | 2×, met |
+
+Memory after GC went down (warm 361 → 342 MB, edit 440 → 423 MB), so the 16 MB copy of module code doesn't show.
+
+## Fixes to phase 2 and 4 code, found on Bluesky
+
+The coordinator's cloud check of Bluesky (Expo 57, RN 0.86) found two bugs. Each has a test that fails before the fix.
+
+- **delta-core (phase 4):** the Rust graph threw on Expo's virtual module path `\0polyfill:assets-registry`.
+  - Paths now cross one at a time (`graphInternPath`) instead of joined by NUL, so any string is held.
+  - Paths with a lone surrogate cross as an escaped key. napi's U+FFFD replacement had made two such paths share one id.
+  - Commits `52f01f867` (test) and `9ae0acda8` (fix).
+- **resolver (phase 2):** `RustFileStore.rebuild` loaded symlinks whose target the file map had not read yet (`H.SYMLINK === 1`) as plain files.
+  - Metro's own file map reads every link while it builds. Expo's reads them lazily, so its pnpm workspace links failed to resolve.
+  - Such links are now read through the file system's `lookup()`, which makes Expo's file map read them, or failing that with `readlink` resolved as the file map would. A link that is gone is left out.
+  - Commits `efc205be7` (black-box test of a symlinked workspace, which passes with Metro's own file map) and `822fd3c9d` (fix, with the unit test `RustFileStore-test.js`).
+
 ## Tests first
 
 **Existing coverage:**
