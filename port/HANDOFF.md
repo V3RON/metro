@@ -1,6 +1,6 @@
 # Handoff: Metro → Rust port, phase 4 in progress
 
-Written 2026-10-14 at about 20:40 UTC, when Szymon stopped work for the day. Read [RULES.md](../RULES.md) first; it is binding. Then read this file, then [port/design/phase-4.md](design/phase-4.md).
+Written 2026-10-14 at about 20:40 UTC; §1, §3 and §4 updated 2026-10-15 after the step 3 validation. Read [RULES.md](../RULES.md) first; it is binding. Then read this file, then [port/design/phase-4.md](design/phase-4.md).
 
 ## 1. Where things stand
 
@@ -27,43 +27,26 @@ Phase 4 commits, oldest first:
 
 **Steps 3 and 4 are not done.**
 
-### How far step 3 got (`85eeb28e7`)
+### Step 3, batch resolution: implemented and validated on the Mac (`85eeb28e7`, then docs)
 
-Implemented:
+Implemented (see [port/design/phase-4.md](design/phase-4.md), "Step 3 as built", for the design choices):
 
-- **Rust cache.** `metro-rs/crates/resolver/src/resolution_cache.rs` holds the resolution cache. It uses DependencyGraph's compound key, and the `assumeFlatNodeModules` origin-key rule. It has unit tests.
-- **Binding** (`metro-rs/crates/binding/src/resolver.rs`):
-  - the `ResolutionCache` napi class;
-  - `resolverResolveBatch`. It resolves a module's dependencies in order and stops at the first one it can't answer natively: a scheme resolver, an error, or an `empty` or `assetFiles` result. Warnings are buffered per dependency and only emitted once that dependency is answered.
-- **JS:**
-  - `rust.js`: `getBatchSupport` (fully native contexts only) and `resolveBatchWithRust`.
-  - `DependencyGraph.js`:
-    - the native cache replaces `_resolutionCache` when `incremental` is on and the resolver and file map are native;
-    - it is cleared in `_onHasteChange`;
-    - `prepareBatchResolution` and `supportsBatchResolution`.
-  - `transformHelpers.getResolveDependencyFn` tags the resolve function with `BATCH_RESOLVE` (`DeltaBundler/batchResolve.js`).
-  - `buildSubgraph.resolveDependencies` batches, then resolves the stopped dependency per dependency as today, then re-batches from the next one.
-- **Verify** (`METRO_RUST_VERIFY=incremental`): every natively answered dependency is re-resolved through the JS path with a shadow cache.
+- Rust `ResolutionCache` (`metro-rs/crates/resolver/src/resolution_cache.rs`), the `ResolutionCache` napi class and `resolverResolveBatch` (`metro-rs/crates/binding/src/resolver.rs`).
+- JS: `rust.js` (`getBatchSupport`, `resolveBatchWithRust`), `DependencyGraph.js` (native cache, `prepareBatchResolution`), the `BATCH_RESOLVE` tag in `transformHelpers`, batching in `buildSubgraph`.
+- Verify: `METRO_RUST_VERIFY=incremental`.
 
-Checked:
+Validated on the Mac (2026-10-15), phase 4 component list:
 
-- cargo fmt, clippy and test;
-- build:fast, flow, eslint;
-- the new black-box test, 12/12 in JS, and in Rust mode with verify;
-- a throwaway spy, not committed, confirmed the batch path is really taken.
+- `./gate.sh --only compile --phase 4`: passed.
+- Jest with `METRO_RUST=off` (`packages/metro packages/metro-resolver port/blackbox`): 160 suites, 2885 passed, 1 skipped.
+- Jest in Rust mode with verify, js-only list applied: 138 suites, 2404 passed, 1 skipped, in the first run with one failure. Later full runs under a Mac load of 10 to 17 failed in watcher or server tests that differed from run to run (metro-file-map watcher integration, `port/blackbox` file-map watch mode, `server-test`, and once `Server-test` "failed to run"). Each of them passes when re-run alone in Rust mode with verify, and `server-test` also passes with `incremental` left out. None involves resolution. Treat as Mac load. The cloud gate run is the real check.
+- `port/diff/differential.js --phase 4`: passed (bench dev and prod, integration bundle; bundles and maps identical).
+- `port/diff/hmr-session.js --phase 4`: passed, 40 messages identical.
+- Release build and rough Mac warm-build: see §4. **`incremental` does not show a gain on the Mac** (about 4 to 8% slower in 3 of 3 pairs, within Mac noise). Check it in the cloud before deciding whether step 3 is worth its code.
 
-Not yet checked:
+Known limit: an invalid `require.context` regexp that throws in the middle of a module happens after the batch has already resolved the later dependencies. That gives extra cache entries and warnings that today's order wouldn't. Mention it in the PR.
 
-- full Rust-mode Jest with verify (packages/metro, metro-resolver, port/blackbox, js-only list applied);
-- `port/diff/differential.js --phase 4` and `port/diff/hmr-session.js --phase 4`;
-- `./gate.sh --only compile --phase 4`;
-- release-build perf.
-
-One JS-only failure in the step's run, `port/blackbox/__tests__/file-map-test.js`, is probably the known watcher timeout. Re-run it alone.
-
-Not yet written down: the step 3 design choices (a separate `ResolutionCache` class; verify re-resolves with the Rust resolver, so it checks cache and batch semantics, not the resolver). Add them to [port/design/phase-4.md](design/phase-4.md).
-
-Known limit: an invalid `require.context` regexp that throws in the middle of a module happens after the batch has already resolved the later dependencies. That gives extra cache entries and warnings that today's order wouldn't. It is an extreme edge case; mention it in the PR.
+**Step 4 is not started.**
 
 ## 2. Decisions Szymon made (binding)
 
@@ -82,10 +65,10 @@ Known limit: an invalid `require.context` regexp that throws in the middle of a 
 ## 3. Next steps, in order
 
 1. **Pull `port/phase-4`** and confirm the head is this handoff commit or later.
-2. **Finish step 3, batch resolution.**
+2. **Step 3, batch resolution: done on the Mac (see §1).** Remaining: the cloud perf check of `incremental` against the list without it.
+   - Original motivation, kept for reference:
    - It removes about 27k JS `resolveDependency` calls per bench-app build.
    - A native resolve costs about 32 µs per call (cloud), which is why the cache moves too.
-   - Run the unchecked items above and fix what fails. Then record the design choices and measure warm-build with and without `incremental`.
 3. **Step 4, graph topology in Rust** ([port/design/phase-4.md](design/phase-4.md) §4).
    - Modules become FileIds, plus edges, inverse dependencies and cycle collection.
    - Rust returns one delta per traversal. JS updates the real `graph.dependencies` and `Module` objects in exactly today's insertion order (rule 9).
@@ -128,6 +111,15 @@ After-GC RSS was 337–342 MB with worker-farm, against 360–378 MB for JS.
 | with transform-cache | 1640 ms | 1754 ms | 1522 ms |
 
 transform-cache has no cloud numbers yet.
+
+**Mac only (not valid for decisions)** — release build, warm-build, 3 interleaved rounds, full phase-4 list against the same list without `incremental`:
+
+| | Round 1 | Round 2 | Round 3 |
+|---|---:|---:|---:|
+| without incremental | 1391 ms | 1379 ms | 1633 ms |
+| with incremental | 1490 ms | 1437 ms | 1789 ms |
+
+No gain on the Mac, probably because resolution is a small share of the warm-build here and the load was 6 to 17. Measure in the cloud.
 
 ## 5. Machines and how to work
 
