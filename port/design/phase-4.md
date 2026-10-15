@@ -62,6 +62,14 @@ Each step is measured in the cloud before the next one starts.
   - a custom `resolveRequest`, scheme resolvers and replaced callbacks still go through the per-dependency JS path for that module;
   - the resolution cache is cleared on file changes, as `_onHasteChange` does today.
 
+### Step 3 as built (batch resolution)
+
+- **A separate `ResolutionCache` napi class**, not an extension of the resolver binding's file-system handle. Its key is DependencyGraph's compound key (origin, resolver options, platform, name, `isESMImport`) with the `assumeFlatNodeModules` origin-key rule. `DependencyGraph` swaps it in for `_resolutionCache` only when `incremental` is on and the resolver and file map are native. `_onHasteChange` clears it, as it clears the JS cache.
+- **`resolverResolveBatch`** resolves one module's dependencies in order and stops at the first one it cannot answer natively: a scheme resolver, an error, or an `empty` or `assetFiles` result. JS resolves that one per dependency, as today (so errors and user hooks run in JS), then re-batches from the next dependency. Warnings are buffered per dependency and emitted only once that dependency is answered.
+- **Tagging (rule 7).** `transformHelpers.getResolveDependencyFn` tags Metro's own resolve function with `BATCH_RESOLVE`. A replaced resolve function has no tag and takes the per-dependency path.
+- **Verify** (`METRO_RUST_VERIFY=incremental`) re-resolves each natively answered dependency through the JS path with a shadow cache. The JS path in verify mode still uses the Rust resolver (`resolver` is on), so verify checks the cache and batch semantics, not the resolver itself. The resolver is checked by its own verify mode and the differential.
+- **Known limit.** An invalid `require.context` regexp that throws in the middle of a module's dependency list throws after the batch has already resolved the later dependencies. That leaves extra cache entries and warnings that today's order would not produce. The bundle result and the error are the same. It is an extreme edge case; named in the PR.
+
 ### 4. Graph topology in Rust
 
 - **Moves to Rust:** modules as `FileId`s, forward edges with their keys, inverse dependencies, the entry points, cycle collection (`Graph.#collectCycles`), and the traversal and deletion order of `traverseDependencies`.
