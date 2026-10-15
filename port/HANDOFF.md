@@ -1,6 +1,6 @@
 # Handoff: Metro → Rust port, phase 4 in progress
 
-Written 2026-10-14 at about 20:40 UTC; §1, §3 and §4 updated 2026-10-15 after the step 3 validation. Read [RULES.md](../RULES.md) first; it is binding. Then read this file, then [port/design/phase-4.md](design/phase-4.md).
+Written 2026-10-14 at about 20:40 UTC; §1, §3 and §4 updated 2026-10-15 after the step 3 and step 4 validations. Read [RULES.md](../RULES.md) first; it is binding. Then read this file, then [port/design/phase-4.md](design/phase-4.md).
 
 ## 1. Where things stand
 
@@ -25,7 +25,7 @@ Phase 4 commits, oldest first:
 | `24dd55c3d` | Black-box tests for resolving a module's dependencies, [port/blackbox/__tests__/resolution-per-module-test.js](blackbox/__tests__/resolution-per-module-test.js), 12 tests. They pass on JS. |
 | `85eeb28e7` | **Step 3, batch resolution: WIP, gates not run.** Details below. |
 
-**Steps 3 and 4 are not done.**
+**Step 4 is implemented and validated on the Mac (see below). The cloud gate and perf check are still to run.**
 
 ### Step 3, batch resolution: implemented and validated on the Mac (`85eeb28e7`, then docs)
 
@@ -46,7 +46,15 @@ Validated on the Mac (2026-10-15), phase 4 component list:
 
 Known limit: an invalid `require.context` regexp that throws in the middle of a module happens after the batch has already resolved the later dependencies. That gives extra cache entries and warnings that today's order wouldn't. Mention it in the PR.
 
-**Step 4 is not started.**
+### Step 4, graph topology in Rust: implemented and validated on the Mac
+
+- New crate `metro-rs/crates/graph` (pure Rust, no dependencies; the napi class `DeltaGraph` is in `crates/binding/src/graph.rs`), JS in `packages/metro/src/DeltaBundler/rustGraph.js` and `Graph.js`. Design and delta format: [port/design/phase-4.md](design/phase-4.md), "Step 4 as built".
+- Black-box tests first, committed separately: `port/blackbox/__tests__/graph-topology-test.js` (8 tests: cycles, async imports, `require.context`, delete and re-add, entry points, rollback after an error; each checks the module set against a fresh server). `Graph-test.js` (92 tests) runs in Rust mode too; no js-only entries were added.
+- Verify mode `METRO_RUST_VERIFY=delta-core` keeps a JS shadow graph and compares everything after each traversal.
+- The Rust topology is decided on the first `initialTraverseDependencies`; config reaches it through a tag on Metro's `resolve` function (`RUST_CONFIG`), because adding a field to `Options` breaks `Server-test`'s exact assertions.
+- Public API unchanged (`yarn build-api-snapshots` leaves `API.md` untouched; the api-snapshots test passes). Run Flow only as `yarn --silent typecheck`, never a Flow server.
+- Mac, phase 4 list: `./gate.sh --only compile --phase 4` passes; `cargo test --workspace` passes; Jest with `METRO_RUST=off`: 163 suites, 2918 passed, 1 skipped, the only failure being `port/blackbox/file-map-test` (Mac load; passes alone); Jest in Rust mode with verify and the js-only list: 141 suites, 2436 passed, 1 skipped, failures only in watcher suites (`FallbackWatcher-test`, watcher `integration-test`, black-box `file-map-test`) that pass alone in Rust mode and with Rust off; differential and HMR session pass.
+- Rough Mac warm-build (release): see §4.
 
 ## 2. Decisions Szymon made (binding)
 
@@ -69,7 +77,7 @@ Known limit: an invalid `require.context` regexp that throws in the middle of a 
    - Original motivation, kept for reference:
    - It removes about 27k JS `resolveDependency` calls per bench-app build.
    - A native resolve costs about 32 µs per call (cloud), which is why the cache moves too.
-3. **Step 4, graph topology in Rust** ([port/design/phase-4.md](design/phase-4.md) §4).
+3. **Step 4, graph topology in Rust: done on the Mac** ([port/design/phase-4.md](design/phase-4.md) §4). Remaining: the cloud gate and perf check. Original plan:
    - Modules become FileIds, plus edges, inverse dependencies and cycle collection.
    - Rust returns one delta per traversal. JS updates the real `graph.dependencies` and `Module` objects in exactly today's insertion order (rule 9).
    - This starts the JS id→path array (rule 4).
@@ -120,6 +128,17 @@ transform-cache has no cloud numbers yet.
 | with incremental | 1490 ms | 1437 ms | 1789 ms |
 
 No gain on the Mac, probably because resolution is a small share of the warm-build here and the load was 6 to 17. Measure in the cloud.
+
+**Mac only (not valid for decisions)** — step 4, release build, 3 interleaved rounds, phase 4 list with and without `delta-core`:
+
+| | Round 1 | Round 2 | Round 3 | Median |
+|---|---:|---:|---:|---:|
+| warm-build without delta-core | 1485 ms | 1403 ms | 1379 ms | 1403 ms |
+| warm-build with delta-core | 1414 ms | 1342 ms | 1791 ms | 1414 ms |
+| edit without delta-core | 148 ms | 137 ms | 550 ms | 148 ms |
+| edit with delta-core | 148 ms | 140 ms | 112 ms | 140 ms |
+
+No measurable change either way on the Mac (round-3 outliers are load). The graph bookkeeping is only about 82 ms of the cloud warm-build, and most of the JS work (building the module objects and maps) remains.
 
 ## 5. Machines and how to work
 
