@@ -26,6 +26,8 @@ This evaluation is separate from the phase gates. It doesn't change the phase 5 
 2. **Bluesky** (`bluesky-social/social-app` on GitHub, open source; Szymon's choice, 2026-10-15). A real Expo / React Native app with a large dependency tree and assets.
    - The commit is pinned when the evaluation starts and recorded in the report.
    - It is checked out under `port/.cache/`, outside the bench app and the gates.
+   - **Version gap, not a port issue.** `DependencyGraph.getDynamicRoots()` calls `this._haste.getRoots()`, which comes from upstream Metro (`d951142f3`, "Read dynamic roots from the file map", included in `baselineRef`). @expo/metro-file-map 57 has no `getRoots()`, so Bluesky on this Metro needs a small shim on both sides, JS and hybrid alike. The evaluation applies the same shim to both and records it. The port does not change it.
+   - **First check at `822fd3c`** (coordinator, cloud, all 18 components on): the production bundle and map are byte-identical to stock, with no `METRO_RUST_VERIFY` mismatch. Dev builds are identical to the fork's JS mode. This followed the two fixes Bluesky had uncovered (see `phase-5.md`).
 3. **A monorepo layout** (workspaces, symlinked packages), if neither app has one. Resolution and the file map behave differently there.
 
 ## Scenarios
