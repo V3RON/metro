@@ -49,6 +49,10 @@ import getAllFiles from './DeltaBundler/Serializers/getAllFiles';
 import getAssets from './DeltaBundler/Serializers/getAssets';
 import {getExplodedSourceMap} from './DeltaBundler/Serializers/getExplodedSourceMap';
 import getRamBundleInfo from './DeltaBundler/Serializers/getRamBundleInfo';
+import {
+  isRustBundleEnabled,
+  rustBundle,
+} from './DeltaBundler/Serializers/rustBundle';
 import {sourceMapStringNonBlocking} from './DeltaBundler/Serializers/sourceMapString';
 import IncrementalBundler from './IncrementalBundler';
 import ResourceNotFoundError from './IncrementalBundler/ResourceNotFoundError';
@@ -1049,7 +1053,8 @@ export default class Server {
     },
     createEndEntry(
       context: ProcessEndContext<{
-        bundle: string,
+        bundle: string | Buffer,
+        bundleLength?: number,
         lastModifiedDate: Date,
         nextRevId: RevisionId,
         numModifiedFiles: number,
@@ -1107,55 +1112,71 @@ export default class Server {
 
       bundlePerfLogger.point('resolvingAndTransformingDependencies_end');
       bundlePerfLogger.point('serializingBundle_start');
-      const serializer =
-        this._config.serializer.customSerializer ||
-        ((entryPoint, preModules, graph, options) =>
-          bundleToString(baseJSBundle(entryPoint, preModules, graph, options))
-            .code);
-
-      const bundle = await serializer(
-        entryFile,
-        revision.prepend,
-        revision.graph,
-        {
-          asyncRequireModulePath: await this._resolveRelativePath(
-            this._config.transformer.asyncRequireModulePath,
-            {
-              relativeTo: 'project',
-              resolverOptions,
-              transformOptions,
-            },
+      const serializeOptions = {
+        asyncRequireModulePath: await this._resolveRelativePath(
+          this._config.transformer.asyncRequireModulePath,
+          {
+            relativeTo: 'project',
+            resolverOptions,
+            transformOptions,
+          },
+        ),
+        processModuleFilter: this._config.serializer.processModuleFilter,
+        createModuleId: this._createModuleId,
+        getRunModuleStatement: this._config.serializer.getRunModuleStatement,
+        globalPrefix: this._config.transformer.globalPrefix,
+        includeAsyncPaths: graphOptions.lazy,
+        dev: transformOptions.dev,
+        projectRoot: this._config.projectRoot,
+        modulesOnly: serializerOptions.modulesOnly,
+        runBeforeMainModule:
+          this._config.serializer.getModulesRunBeforeMainModule(
+            path.relative(this._config.projectRoot, entryFile),
           ),
-          processModuleFilter: this._config.serializer.processModuleFilter,
-          createModuleId: this._createModuleId,
-          getRunModuleStatement: this._config.serializer.getRunModuleStatement,
-          globalPrefix: this._config.transformer.globalPrefix,
-          includeAsyncPaths: graphOptions.lazy,
-          dev: transformOptions.dev,
-          projectRoot: this._config.projectRoot,
-          modulesOnly: serializerOptions.modulesOnly,
-          runBeforeMainModule:
-            this._config.serializer.getModulesRunBeforeMainModule(
-              path.relative(this._config.projectRoot, entryFile),
-            ),
-          runModule: serializerOptions.runModule,
-          sourceMapUrl: serializerOptions.sourceMapUrl,
-          sourceUrl: serializerOptions.sourceUrl,
-          inlineSourceMap: serializerOptions.inlineSourceMap,
-          serverRoot: this._rootUrlMap.serverRootDir,
-          shouldAddToIgnoreList: (module: Module<>) =>
-            this._shouldAddModuleToIgnoreList(module),
-          getSourceUrl: (module: Module<>) =>
-            this._getModuleSourceUrl(module, serializerOptions.sourcePaths),
-          dependencyMapReservedName:
-            this._config.transformer.unstable_dependencyMapReservedName,
-          unstable_inlineDependencyMap:
-            this._config.serializer.unstable_inlineDependencyMap,
-        },
-      );
-      bundlePerfLogger.point('serializingBundle_end');
+        runModule: serializerOptions.runModule,
+        sourceMapUrl: serializerOptions.sourceMapUrl,
+        sourceUrl: serializerOptions.sourceUrl,
+        inlineSourceMap: serializerOptions.inlineSourceMap,
+        serverRoot: this._rootUrlMap.serverRootDir,
+        shouldAddToIgnoreList: (module: Module<>) =>
+          this._shouldAddModuleToIgnoreList(module),
+        getSourceUrl: (module: Module<>) =>
+          this._getModuleSourceUrl(module, serializerOptions.sourcePaths),
+        dependencyMapReservedName:
+          this._config.transformer.unstable_dependencyMapReservedName,
+        unstable_inlineDependencyMap:
+          this._config.serializer.unstable_inlineDependencyMap,
+      };
+      const customSerializer = this._config.serializer.customSerializer;
+      let bundleCode: string | Buffer;
+      let bundleLength: ?number;
+      if (customSerializer == null && isRustBundleEnabled(this._config)) {
+        // The bytes of the default serializer's bundle, assembled in Rust;
+        // the length is that of the string they stand for.
+        const rustResult = rustBundle(
+          entryFile,
+          revision.prepend,
+          revision.graph,
+          serializeOptions,
+        );
+        bundleCode = rustResult.buffer;
+        bundleLength = rustResult.utf16Length;
+      } else {
+        const serializer =
+          customSerializer ||
+          ((entryPoint, preModules, graph, options) =>
+            bundleToString(baseJSBundle(entryPoint, preModules, graph, options))
+              .code);
 
-      const bundleCode = typeof bundle === 'string' ? bundle : bundle.code;
+        const bundle = await serializer(
+          entryFile,
+          revision.prepend,
+          revision.graph,
+          serializeOptions,
+        );
+        bundleCode = typeof bundle === 'string' ? bundle : bundle.code;
+      }
+      bundlePerfLogger.point('serializingBundle_end');
 
       return {
         numModifiedFiles: delta.reset
@@ -1164,13 +1185,17 @@ export default class Server {
         lastModifiedDate: revision.date,
         nextRevId: revision.id,
         bundle: bundleCode,
+        bundleLength,
       };
     },
     finish({req, mres, serializerOptions, result, bundlePerfLogger}) {
+      const bundleByteLength = Buffer.isBuffer(result.bundle)
+        ? result.bundle.length
+        : Buffer.byteLength(result.bundle);
       bundlePerfLogger.annotate({
         int: {
-          bundle_length: result.bundle.length,
-          bundle_byte_length: Buffer.byteLength(result.bundle),
+          bundle_length: result.bundleLength ?? result.bundle.length,
+          bundle_byte_length: bundleByteLength,
         },
       });
       mres.once('error', () => {
@@ -1210,10 +1235,7 @@ export default class Server {
         }
         mres.setHeader('Content-Type', 'application/javascript; charset=UTF-8');
         mres.setHeader('Last-Modified', result.lastModifiedDate.toUTCString());
-        mres.setHeader(
-          'Content-Length',
-          String(Buffer.byteLength(result.bundle)),
-        );
+        mres.setHeader('Content-Length', String(bundleByteLength));
         mres.end(result.bundle);
       }
     },
