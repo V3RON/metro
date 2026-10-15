@@ -10,7 +10,7 @@ This evaluation is separate from the phase gates. It doesn't change the phase 5 
 
 - **JS:** pure-JS Metro at `baselineRef`, the same baseline the gates use.
 - **Hybrid:** this repository at the approved phase 5 head, with `METRO_RUST=all`.
-- **Also reported, for context:** Metro at `baselineRef` with `@swc/core`-based transformation (the bench app already depends on it), to show how much of a cold build the transform alone accounts for. That is what phase 6 would go after.
+- **swc reference, run after the Bluesky benchmark** (Szymon, 2026-10-15): Metro at `baselineRef` with `@swc/core`-based transformation (the bench app already depends on it). It shows how much of a cold build the transform alone accounts for, which is what phase 6 would go after.
 
 ## Machines
 
@@ -23,12 +23,9 @@ This evaluation is separate from the phase gates. It doesn't change the phase 5 
 ## Apps
 
 1. **The bench app** (`port/bench/app`): synthetic, 1,500 components, about 2,700 modules in the graph. Every gate number so far comes from it.
-2. **At least one real React Native app.** **Szymon to choose (open question).** What matters in the choice:
-   - a real dependency tree (node_modules with Haste-free packages, `exports` maps, symlinks from a monorepo);
-   - assets;
-   - a size larger than the bench app.
-
-   Candidates: an internal app, or a public one such as the RN tester app or an Expo example.
+2. **Bluesky** (`bluesky-social/social-app` on GitHub, open source; Szymon's choice, 2026-10-15). A real Expo / React Native app with a large dependency tree and assets.
+   - The commit is pinned when the evaluation starts and recorded in the report.
+   - It is checked out under `port/.cache/`, outside the bench app and the gates.
 3. **A monorepo layout** (workspaces, symlinked packages), if neither app has one. Resolution and the file map behave differently there.
 
 ## Scenarios
@@ -81,9 +78,9 @@ The speed-up is weighed against what the hybrid costs to keep:
 
 Szymon decides.
 
-## What a "paid off" result looks like (proposed, for Szymon to set)
+## What a "paid off" result looks like
 
-These thresholds are a proposal. The decision is Szymon's:
+Szymon agreed to these thresholds on 2026-10-15:
 
 - **Warm-build and branch-switch:** ≥ 2× on the real app, on both machines.
 - **Edit:** no slower on any app, and faster where the edit isn't dominated by the watcher.
