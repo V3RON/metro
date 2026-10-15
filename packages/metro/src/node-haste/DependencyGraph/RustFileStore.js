@@ -12,6 +12,9 @@
 import type {ChangeEvent, FileSystem} from 'metro-file-map';
 
 import H from 'metro-file-map/private/constants';
+import normalizePathSeparatorsToPosix from 'metro-file-map/private/lib/normalizePathSeparatorsToPosix';
+import {RootPathUtils} from 'metro-file-map/private/lib/RootPathUtils';
+import fs from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -39,7 +42,7 @@ type NativeFileStore = {
 };
 
 type Binding = {
-  FileStore: Class<NativeFileStore> & {new (rootDir: string): NativeFileStore},
+  FileStore: Class<NativeFileStore> & {new(rootDir: string): NativeFileStore},
   ...
 };
 
@@ -57,10 +60,12 @@ type TreeFSEntries = {
 export default class RustFileStore {
   readonly native: NativeFileStore;
   #fileSystem: FileSystem;
+  #pathUtils: RootPathUtils;
 
   constructor(binding: Binding, rootDir: string, fileSystem: FileSystem) {
     this.native = new binding.FileStore(rootDir);
     this.#fileSystem = fileSystem;
+    this.#pathUtils = new RootPathUtils(rootDir);
     this.rebuild();
   }
 
@@ -71,28 +76,77 @@ export default class RustFileStore {
    * The store's package.json cache is kept, like the JS PackageCache.
    */
   rebuild(): void {
-    // TreeFS, the only FileSystem implementation, has this.
+    // Metro's TreeFS has this, and so do file maps built on it (Expo's).
     const treeFS: TreeFSEntries = this.#fileSystem as any;
     const paths: Array<string> = [];
     const kinds: Array<number> = [];
     const symlinkTargets: Array<string> = [];
+    // Symlinks whose target the file map has not read yet (H.SYMLINK === 1).
+    // Metro's own file map reads every link while it builds, but other file
+    // maps (Expo's) read them lazily, on first traversal. They are read after
+    // the iteration, which reading could disturb.
+    const unread: Array<{
+      canonicalPath: string,
+      metadata: ReadonlyArray<unknown>,
+    }> = [];
     for (const {canonicalPath, metadata} of treeFS.metadataIterator({
       includeNodeModules: true,
       includeSymlinks: true,
     })) {
-      paths.push(canonicalPath);
       const symlink = metadata[H.SYMLINK];
-      if (typeof symlink === 'string') {
+      if (symlink === 0) {
+        paths.push(canonicalPath);
+        kinds.push(KIND_FILE);
+      } else if (typeof symlink === 'string') {
+        paths.push(canonicalPath);
         kinds.push(KIND_SYMLINK);
         symlinkTargets.push(symlink);
       } else {
-        kinds.push(KIND_FILE);
+        unread.push({canonicalPath, metadata});
+      }
+    }
+    for (const {canonicalPath, metadata} of unread) {
+      const target = this.#readSymlink(canonicalPath, metadata);
+      // A link that is gone is left out, as a lookup would not find it.
+      if (target != null) {
+        paths.push(canonicalPath);
+        kinds.push(KIND_SYMLINK);
+        symlinkTargets.push(target);
       }
     }
     this.native.rebuild(
       paths.join('\0'),
       Uint8Array.from(kinds),
       symlinkTargets.join('\0'),
+    );
+  }
+
+  /**
+   * The target of a symlink the file map has not read yet, as a normal POSIX
+   * path like the ones the file map stores, or null when the link is gone.
+   */
+  #readSymlink(
+    canonicalPath: string,
+    metadata: ReadonlyArray<unknown>,
+  ): ?string {
+    const absolutePath = this.#pathUtils.normalToAbsolute(canonicalPath);
+    try {
+      this.#fileSystem.lookup(absolutePath);
+    } catch {
+      // A file map that cannot look it up still has the fallback below.
+    }
+    const stored = metadata[H.SYMLINK];
+    if (typeof stored === 'string') {
+      return stored;
+    }
+    let readlinkResult;
+    try {
+      readlinkResult = fs.readlinkSync(absolutePath);
+    } catch {
+      return null;
+    }
+    return normalizePathSeparatorsToPosix(
+      this.#pathUtils.resolveSymlinkToNormal(canonicalPath, readlinkResult),
     );
   }
 
@@ -134,4 +188,3 @@ export default class RustFileStore {
     );
   }
 }
-
