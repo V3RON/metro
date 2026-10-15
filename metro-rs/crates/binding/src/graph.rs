@@ -9,14 +9,12 @@ use napi::{Error, Result};
 use napi_derive::napi;
 use std::cell::RefCell;
 
-/// Interns paths (joined with `\0`) and returns their ids, in order. Paths
-/// that were interned before keep their id. Ids are never reused.
+/// Interns one path and returns its id. A path that was interned before keeps
+/// its id. Ids are never reused. Any string is a valid path: virtual modules
+/// (Expo's `\0polyfill:…`) contain NUL, so paths are never joined with it.
 #[napi]
-pub fn graph_intern_paths(joined: String) -> Uint32Array {
-    if joined.is_empty() {
-        return Uint32Array::new(Vec::new());
-    }
-    Uint32Array::new(intern_paths(joined.split('\0')))
+pub fn graph_intern_path(path: String) -> u32 {
+    intern_paths(std::iter::once(path.as_str()))[0]
 }
 
 /// The topology of one graph.

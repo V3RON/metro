@@ -66,15 +66,25 @@ const pathIds: Map<string, number> = new Map();
 const pathList: Array<string> = [];
 let nativeBinding: Loose = null;
 
+// A string that crosses to Rust unchanged. napi converts strings to UTF-8 and
+// replaces lone surrogates, so two such paths could share an id. Those, and
+// any path starting with ESCAPE, cross as ESCAPE + their JSON (which escapes
+// lone surrogates), so different paths always reach Rust as different
+// strings.
+const ESCAPE = '\0\x01';
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+function rustKey(path: string): string {
+  return path.startsWith(ESCAPE) || LONE_SURROGATE.test(path)
+    ? ESCAPE + JSON.stringify(path)
+    : path;
+}
+
 function pathId(path: string): number {
   let id = pathIds.get(path);
   if (id == null) {
-    if (path === '' || path.includes('\0')) {
-      throw new Error(
-        `The Rust graph (delta-core) cannot hold the module path ${JSON.stringify(path)}`,
-      );
-    }
-    id = nativeBinding.graphInternPaths(path)[0] as number;
+    id = nativeBinding.graphInternPath(rustKey(path)) as number;
     pathIds.set(path, id);
     pathList[id] = path;
   }
@@ -153,9 +163,7 @@ export function isVerifyEnabled(): boolean {
 /**
  * The Rust topology for a new graph, or null when `delta-core` is off.
  *
- * Graphs that Rust cannot model use JavaScript: today that is only a path
- * that Rust's table cannot hold (empty, or containing NUL), which fails when
- * it is met instead (no file system has such paths).
+ * Rust holds any module path, including virtual ones (`\0polyfill:…`).
  */
 export function createRustGraph(
   entryPoints: ReadonlySet<string>,
