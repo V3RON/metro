@@ -6,9 +6,8 @@
 
 On 2026-10-15 at 07:34 UTC Szymon chose "Code now" on the card "Start phase 5 code before you approve phase 4?". RULES.md §2 says not to start the next phase before approval, so this is a one-time exception:
 
-- **Branch:** `port/phase-5` is branched from `port/phase-4`, which is not yet approved. It was rebased onto the phase 4 report commit `34fd43fe9`. Phase 4's PR is V3RON/metro#8.
-- **Rebase:** if phase 4's review changes anything, this branch is rebased onto the result.
-- **Gate:** the gate refuses `--phase 5` until phase 4 is approved, and nobody works around that. Until then we run targeted Jest and cargo tests and the differentials directly.
+- **Branch:** `port/phase-5` was first stacked on `port/phase-4` before that was approved. Only the design note and black-box tests in JS were written in that window; no Rust code.
+- **Closed:** Szymon approved phase 4 at 08:01 UTC on 2026-10-15 (`port/approvals/phase-4.md`, `02dc592`). Its PR, V3RON/metro#8, is merged, and this branch was rebased onto `main` at `02dc592`. From here on phase 5 is the current phase, and `./gate.sh` applies normally.
 - **`port/approvals/`** is not touched.
 
 ## Scope and targets (`port/phases.json`; the yardstick is unchanged)
