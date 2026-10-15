@@ -21,6 +21,13 @@ import type {TransformResultDependency} from './types';
  */
 export const BATCH_RESOLVE: symbol = Symbol.for('metro.resolve.batch');
 
+/**
+ * Metro's own `resolve` function also carries `unstable_rust` of the config
+ * under this symbol, which is how `Graph` finds out which components of the
+ * Rust port are on in config (it is not given the config itself).
+ */
+export const RUST_CONFIG: symbol = Symbol.for('metro.resolve.rustConfig');
+
 export type BatchResolution = {
   /**
    * The resolved `filePath` of the dependencies from index `start` on that
@@ -46,6 +53,8 @@ export type PrepareBatchResolution = (
  * public method.
  */
 export type BatchResolver = {
+  /** `unstable_rust` of the config the `DependencyGraph` was made with. */
+  unstable_rust: ?Readonly<{[componentId: string]: boolean}>,
   supports(): boolean,
   prepare(
     originModulePath: string,

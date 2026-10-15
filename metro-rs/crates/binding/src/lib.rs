@@ -14,6 +14,7 @@ use napi::bindgen_prelude::{Buffer, Int32Array};
 use napi_derive::napi;
 
 pub mod file_map;
+pub mod graph;
 pub mod resolver;
 pub mod transform_cache;
 

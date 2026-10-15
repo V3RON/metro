@@ -155,6 +155,7 @@ export default class DependencyGraph extends EventEmitter {
 
     this._config = config;
     registerBatchResolver(this, {
+      unstable_rust: config.unstable_rust,
       supports: () => this.#supportsBatchResolution(),
       prepare: (...args) => this.#prepareBatchResolution(...args),
     });

@@ -204,6 +204,7 @@ dependencies = [
  "metro-rs-core",
  "metro-rs-file-map",
  "metro-rs-file-store",
+ "metro-rs-graph",
  "metro-rs-haste",
  "metro-rs-resolver",
  "metro-rs-source-map",
@@ -248,6 +249,10 @@ dependencies = [
  "metro-rs-resolver",
  "serde_json",
 ]
+
+[[package]]
+name = "metro-rs-graph"
+version = "0.1.0"
 
 [[package]]
 name = "metro-rs-haste"

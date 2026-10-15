@@ -31,6 +31,7 @@
 
 import type {RequireContext} from '../lib/contextModule';
 import type {RequireContextParams} from '../ModuleGraph/worker/collectDependencies';
+import type {GraphView, RustGraph, RustOutcome} from './rustGraph';
 import type {
   Dependencies,
   Dependency,
@@ -46,7 +47,14 @@ import type {
 import {fileMatchesContext} from '../lib/contextModule';
 import CountingSet from '../lib/CountingSet';
 import {isResolvedDependency} from '../lib/isResolvedDependency';
+import {RUST_CONFIG} from './batchResolve';
 import {buildSubgraph} from './buildSubgraph';
+import {
+  Status,
+  compareGraphs,
+  createRustGraph,
+  isVerifyEnabled,
+} from './rustGraph';
 import invariant from 'invariant';
 import nullthrows from 'nullthrows';
 
@@ -121,6 +129,22 @@ function getInternalOptions<T>({
   };
 }
 
+// Set while a graph makes its shadow (METRO_RUST_VERIFY=delta-core), which
+// always runs the JavaScript implementation.
+let creatingShadow = false;
+
+/** The `Delta` of a traversal as `_buildDelta` returned it, for the shadow. */
+function shadowDelta<T>(delta: Delta<T>): Delta<T> {
+  return {
+    added: new Set(),
+    baseModuleData: new Map(),
+    deleted: new Set(),
+    errors: delta.errors,
+    touched: new Set(),
+    updatedModuleData: delta.updatedModuleData,
+  };
+}
+
 function isWeakOrLazy<T>(
   dependency: ResolvedDependency,
   options: InternalOptions<T>,
@@ -152,9 +176,53 @@ export class Graph<T = MixedOutput> {
   /** Resolved context parameters from `require.context`. */
   #resolvedContexts: Map<string, RequireContext> = new Map();
 
+  // The `delta-core` component of the Rust port: the topology of the graph
+  // (see rustGraph.js). Decided on the first traversal, because that is where
+  // the options (and Metro's config) are.
+  #rust: ?RustGraph = null;
+  #rustDecided: boolean = false;
+  // METRO_RUST_VERIFY=delta-core: a graph made by the JavaScript algorithm
+  // from the same inputs, compared after every traversal.
+  #shadow: ?Graph<T> = null;
+
   constructor(options: GraphInputOptions) {
     this.entryPoints = options.entryPoints;
     this.transformOptions = options.transformOptions;
+    if (creatingShadow) {
+      this.#rustDecided = true;
+    }
+  }
+
+  #view(): GraphView<T> {
+    return {
+      dependencies: this.dependencies,
+      importBundleNodes: this.#importBundleNodes,
+      resolvedContexts: this.#resolvedContexts,
+    };
+  }
+
+  #decideRust(options: Options<T>): void {
+    if (this.#rustDecided) {
+      return;
+    }
+    this.#rustDecided = true;
+    this.#rust = createRustGraph(
+      this.entryPoints,
+      // $FlowFixMe[invalid-computed-prop]
+      // $FlowFixMe[prop-missing]
+      options.resolve[RUST_CONFIG],
+    );
+    if (this.#rust != null && isVerifyEnabled()) {
+      creatingShadow = true;
+      try {
+        this.#shadow = new Graph({
+          entryPoints: this.entryPoints,
+          transformOptions: this.transformOptions,
+        });
+      } finally {
+        creatingShadow = false;
+      }
+    }
   }
 
   /**
@@ -173,6 +241,9 @@ export class Graph<T = MixedOutput> {
     options: Options<T>,
   ): Promise<Result<T>> {
     const internalOptions = getInternalOptions(options);
+    // A graph that was not built by `initialTraverseDependencies` stays in
+    // JavaScript.
+    this.#rustDecided = true;
 
     const modifiedPathsInBaseGraph = new Set(
       paths.filter(path => this.dependencies.has(path)),
@@ -189,6 +260,152 @@ export class Graph<T = MixedOutput> {
         allModifiedPaths.has(absolutePath),
     );
 
+    return this.#commitTraversal(
+      modifiedPathsInBaseGraph,
+      delta,
+      internalOptions,
+    );
+  }
+
+  #commitTraversal(
+    modifiedPathsInBaseGraph: ReadonlySet<string>,
+    delta: Delta<T>,
+    internalOptions: InternalOptions<T>,
+  ): Result<T> {
+    const rust = this.#rust;
+    if (rust == null) {
+      return this.#commitTraversalJs(
+        modifiedPathsInBaseGraph,
+        delta,
+        internalOptions,
+      );
+    }
+    invariant(
+      this.dependencies.size === rust.moduleCount(),
+      'The Rust graph (delta-core) is out of sync with graph.dependencies',
+    );
+    const shadow = this.#shadow;
+    let shadowResult: ?Result<T> = null;
+    let shadowError: unknown = null;
+    let shadowThrew = false;
+    if (shadow != null) {
+      try {
+        shadowResult = shadow.#commitTraversalJs(
+          modifiedPathsInBaseGraph,
+          shadowDelta(delta),
+          internalOptions,
+        );
+      } catch (error) {
+        shadowThrew = true;
+        shadowError = error;
+      }
+    }
+
+    let result: ?Result<T> = null;
+    let outcome: ?RustOutcome = null;
+    let thrown: unknown = null;
+    let threw = false;
+    try {
+      outcome = rust.traverse(
+        false,
+        this.#view(),
+        modifiedPathsInBaseGraph,
+        delta.errors,
+        delta.updatedModuleData,
+        internalOptions,
+      );
+      result = this.#resultFromRust(outcome, delta);
+    } catch (error) {
+      threw = true;
+      thrown = error;
+    }
+
+    if (shadow != null) {
+      this.#verifyAgainst(
+        shadow,
+        outcome,
+        shadowResult,
+        threw,
+        thrown,
+        shadowThrew,
+        shadowError,
+      );
+    }
+    if (threw) {
+      throw thrown;
+    }
+    return nullthrows(result);
+  }
+
+  #resultFromRust(outcome: RustOutcome, delta: Delta<T>): Result<T> {
+    switch (outcome.status) {
+      case Status.OK: {
+        const added = new Map<string, Module<T>>();
+        for (const path of outcome.added) {
+          added.set(path, nullthrows(this.dependencies.get(path)));
+        }
+        const modified = new Map<string, Module<T>>();
+        for (const path of outcome.modified) {
+          modified.set(path, nullthrows(this.dependencies.get(path)));
+        }
+        return {added, deleted: new Set(outcome.deleted), modified};
+      }
+      case Status.MODULE:
+        // The graph has been rolled back. Re-throw the transform or
+        // resolution error originally seen by `buildSubgraph`.
+        throw delta.errors.get(nullthrows(outcome.errorPath));
+      case Status.NULL_THROWS:
+        return nullthrows(null);
+      case Status.INVARIANT:
+        invariant(false, nullthrows(outcome.invariantMessage));
+        throw new Error('unreachable');
+      default:
+        throw new RangeError('Maximum call stack size exceeded');
+    }
+  }
+
+  #verifyAgainst(
+    shadow: Graph<T>,
+    outcome: ?RustOutcome,
+    shadowResult: ?Result<T>,
+    threw: boolean,
+    thrown: unknown,
+    shadowThrew: boolean,
+    shadowError: unknown,
+  ): void {
+    if (threw !== shadowThrew) {
+      throw new Error(
+        `METRO_RUST_VERIFY=delta-core: the traversal ${threw ? 'threw' : 'did not throw'} with Rust topology but ${shadowThrew ? 'threw' : 'did not throw'} in JavaScript.\n  Rust: ${String(thrown)}\n  JS:   ${String(shadowError)}`,
+      );
+    }
+    if (threw && thrown !== shadowError) {
+      const message = (e: unknown) =>
+        e instanceof Error ? e.message : String(e);
+      if (message(thrown) !== message(shadowError)) {
+        throw new Error(
+          `METRO_RUST_VERIFY=delta-core: the traversal threw different errors.\n  Rust: ${message(thrown)}\n  JS:   ${message(shadowError)}`,
+        );
+      }
+    }
+    compareGraphs(
+      this.#view(),
+      shadow.#view(),
+      outcome,
+      shadowResult == null
+        ? null
+        : {
+            added: [...shadowResult.added.keys()],
+            deleted: [...shadowResult.deleted],
+            modified: [...shadowResult.modified.keys()],
+          },
+    );
+  }
+
+  #commitTraversalJs(
+    modifiedPathsInBaseGraph: ReadonlySet<string>,
+    delta: Delta<T>,
+    internalOptions: InternalOptions<T>,
+  ): Result<T> {
     // If we have errors we might need to roll back any changes - take
     // snapshots of all modified modules at the base state. We'll also snapshot
     // unmodified modules that become unreachable as they are released, so that
@@ -308,6 +525,8 @@ export class Graph<T = MixedOutput> {
       'initialTraverseDependencies called on nonempty graph',
     );
 
+    this.#decideRust(options);
+
     this.#gc.color.clear();
     this.#gc.possibleCycleRoots.clear();
     this.#importBundleNodes.clear();
@@ -326,6 +545,64 @@ export class Graph<T = MixedOutput> {
       throw delta.errors.values().next().value;
     }
 
+    const rust = this.#rust;
+    const shadow = this.#shadow;
+    if (rust == null) {
+      this.#commitInitialJs(delta, internalOptions);
+    } else {
+      let shadowThrew = false;
+      let shadowError: unknown = null;
+      if (shadow != null) {
+        try {
+          shadow.#commitInitialJs(shadowDelta(delta), internalOptions);
+        } catch (error) {
+          shadowThrew = true;
+          shadowError = error;
+        }
+      }
+      let thrown: unknown = null;
+      let threw = false;
+      try {
+        const outcome = rust.traverse(
+          true,
+          this.#view(),
+          this.entryPoints,
+          delta.errors,
+          delta.updatedModuleData,
+          internalOptions,
+        );
+        // Errors in the delta were thrown above, so anything but success
+        // here is exceptional and fatal.
+        this.#resultFromRust(outcome, delta);
+        this.reorderGraph({shallow: options.shallow});
+      } catch (error) {
+        threw = true;
+        thrown = error;
+      }
+      if (shadow != null) {
+        this.#verifyAgainst(
+          shadow,
+          null,
+          null,
+          threw,
+          thrown,
+          shadowThrew,
+          shadowError,
+        );
+      }
+      if (threw) {
+        throw thrown;
+      }
+    }
+
+    return {
+      added: this.dependencies,
+      deleted: new Set(),
+      modified: new Map(),
+    };
+  }
+
+  #commitInitialJs(delta: Delta<T>, internalOptions: InternalOptions<T>): void {
     for (const path of this.entryPoints) {
       // We have already thrown on userland errors in the delta, so any error
       // encountered here would be exceptional and fatal.
@@ -333,14 +610,8 @@ export class Graph<T = MixedOutput> {
     }
 
     this.reorderGraph({
-      shallow: options.shallow,
+      shallow: internalOptions.shallow,
     });
-
-    return {
-      added: this.dependencies,
-      deleted: new Set(),
-      modified: new Map(),
-    };
   }
 
   async _buildDelta(

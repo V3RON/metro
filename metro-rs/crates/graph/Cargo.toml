@@ -1,0 +1,9 @@
+[package]
+name = "metro-rs-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Module graph topology of the Delta Bundler (port of the bookkeeping in metro's Graph.js), pure Rust."
+
+[dependencies]
