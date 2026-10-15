@@ -17,6 +17,7 @@ import type {ConfigT} from 'metro-config';
 import {getAssetUrlPath} from '../Assets';
 import {normalizePathSeparatorsToPosix} from '../lib/pathUtils';
 import getTransformCacheKey from './getTransformCacheKey';
+import {tagSourceFile} from './sourceFileTag';
 import WorkerFarm from './WorkerFarm';
 import {isRustEnabled} from 'metro-rust-switch';
 import debugModule from 'debug';
@@ -229,15 +230,21 @@ export default class Transformer {
       });
     });
 
+    function getSource(): Buffer {
+      if (fileBuffer) {
+        return fileBuffer;
+      }
+      return fs.readFileSync(filePath);
+    }
+    if (!fileBuffer) {
+      // Lets the Rust source map writer read the file itself.
+      tagSourceFile(getSource, filePath);
+    }
+
     return {
       ...data.result,
       unstable_transformResultKey: fullKey.toString(),
-      getSource(): Buffer {
-        if (fileBuffer) {
-          return fileBuffer;
-        }
-        return fs.readFileSync(filePath);
-      },
+      getSource,
     };
   }
 

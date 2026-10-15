@@ -53,7 +53,11 @@ import {
   isRustBundleEnabled,
   rustBundle,
 } from './DeltaBundler/Serializers/rustBundle';
-import {sourceMapStringNonBlocking} from './DeltaBundler/Serializers/sourceMapString';
+import {
+  sourceMapBufferNonBlocking,
+  sourceMapStringNonBlocking,
+} from './DeltaBundler/Serializers/sourceMapString';
+import {isRustSourceMapEnabled} from './DeltaBundler/Serializers/rustSourceMap';
 import IncrementalBundler from './IncrementalBundler';
 import ResourceNotFoundError from './IncrementalBundler/ResourceNotFoundError';
 import {calculateBundleProgressRatio} from './lib/bundleProgressUtils';
@@ -298,6 +302,7 @@ export default class Server {
           shouldAddToIgnoreList: bundleOptions.shouldAddToIgnoreList,
           getSourceUrl: (module: Module<>) =>
             this._getModuleSourceUrl(module, serializerOptions.sourcePaths),
+          unstable_rust: this._config.unstable_rust,
         },
       );
     }
@@ -1279,7 +1284,7 @@ export default class Server {
         bundler: 'delta',
       };
     },
-    createEndEntry(context: ProcessEndContext<string>) {
+    createEndEntry(context: ProcessEndContext<string | Buffer>) {
       return {
         bundler: 'delta',
       };
@@ -1315,21 +1320,25 @@ export default class Server {
         prepend = [];
       }
 
-      return await sourceMapStringNonBlocking(
-        [...prepend, ...this._getSortedModules(graph)],
-        {
-          excludeSource: serializerOptions.excludeSource,
-          processModuleFilter: this._config.serializer.processModuleFilter,
-          shouldAddToIgnoreList: (module: Module<>) =>
-            this._shouldAddModuleToIgnoreList(module),
-          getSourceUrl: (module: Module<>) =>
-            this._getModuleSourceUrl(module, serializerOptions.sourcePaths),
-        },
-      );
+      const sourceMapOptions = {
+        excludeSource: serializerOptions.excludeSource,
+        processModuleFilter: this._config.serializer.processModuleFilter,
+        shouldAddToIgnoreList: (module: Module<>) =>
+          this._shouldAddModuleToIgnoreList(module),
+        getSourceUrl: (module: Module<>) =>
+          this._getModuleSourceUrl(module, serializerOptions.sourcePaths),
+        unstable_rust: this._config.unstable_rust,
+      };
+      const modules = [...prepend, ...this._getSortedModules(graph)];
+      if (isRustSourceMapEnabled(sourceMapOptions)) {
+        // The bytes, written by Rust: no string of the whole map is made.
+        return await sourceMapBufferNonBlocking(modules, sourceMapOptions);
+      }
+      return await sourceMapStringNonBlocking(modules, sourceMapOptions);
     },
     finish({mres, result}) {
       mres.setHeader('Content-Type', 'application/json');
-      mres.end(result.toString());
+      mres.end(result);
     },
   });
 

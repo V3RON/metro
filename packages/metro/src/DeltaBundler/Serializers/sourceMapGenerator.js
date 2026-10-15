@@ -20,15 +20,19 @@ export type SourceMapGeneratorOptions = Readonly<{
   processModuleFilter: (module: Module<>) => boolean,
   shouldAddToIgnoreList: (module: Module<>) => boolean,
   getSourceUrl?: ?(module: Module<>) => string,
+  // The `unstable_rust` option of Metro config, for the `serializers`
+  // component, if the caller has the config (see rustSourceMap.js).
+  unstable_rust?: ?{[string]: boolean, ...},
 }>;
 
-function getSourceMapInfosImpl(
+function getSourceMapInfosImpl<T>(
   isBlocking: boolean,
-  onDone: (ReadonlyArray<ReturnType<typeof getSourceMapInfo>>) => void,
+  onDone: (ReadonlyArray<T>) => void,
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
+  getInfo: (Module<>) => T,
 ): void {
-  const sourceMapInfos = [];
+  const sourceMapInfos: Array<T> = [];
   const modulesToProcess = modules
     .filter(isJsModule)
     .filter(options.processModuleFilter);
@@ -40,11 +44,7 @@ function getSourceMapInfosImpl(
 
     const mod = modulesToProcess.shift();
     // $FlowFixMe[incompatible-type]
-    const info = getSourceMapInfo(mod, {
-      excludeSource: options.excludeSource,
-      shouldAddToIgnoreList: options.shouldAddToIgnoreList,
-      getSourceUrl: options.getSourceUrl,
-    });
+    const info = getInfo(mod);
     sourceMapInfos.push(info);
     return false;
   }
@@ -75,6 +75,17 @@ function getSourceMapInfosImpl(
   workLoop();
 }
 
+function getInfoOf(
+  options: SourceMapGeneratorOptions,
+): (Module<>) => ReturnType<typeof getSourceMapInfo> {
+  return mod =>
+    getSourceMapInfo(mod, {
+      excludeSource: options.excludeSource,
+      shouldAddToIgnoreList: options.shouldAddToIgnoreList,
+      getSourceUrl: options.getSourceUrl,
+    });
+}
+
 function sourceMapGenerator(
   modules: ReadonlyArray<Module<>>,
   options: SourceMapGeneratorOptions,
@@ -87,6 +98,7 @@ function sourceMapGenerator(
     },
     modules,
     options,
+    getInfoOf(options),
   );
   if (sourceMapInfos == null) {
     throw new Error(
@@ -103,11 +115,15 @@ async function sourceMapGeneratorNonBlocking(
   const sourceMapInfos = await new Promise<
     ReadonlyArray<ReturnType<typeof getSourceMapInfo>>,
   >(resolve => {
-    getSourceMapInfosImpl(false, resolve, modules, options);
+    getSourceMapInfosImpl(false, resolve, modules, options, getInfoOf(options));
   });
   // Building an index map is a cheap synchronous passthrough (VLQ maps carry
   // over verbatim); only gathering the per-module info above needs to yield.
   return fromRawMappingsIndexed(sourceMapInfos);
 }
 
-export {sourceMapGenerator, sourceMapGeneratorNonBlocking};
+export {
+  getSourceMapInfosImpl,
+  sourceMapGenerator,
+  sourceMapGeneratorNonBlocking,
+};
