@@ -14,6 +14,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub mod index_map;
+
 /// A module's code as stored.
 struct StoredCode {
     bytes: Vec<u8>,
