@@ -54,52 +54,86 @@ The "Phase 5 ms" column is the time each target allows, assuming the JS baseline
   How much of the 293 ms is waiting on the watcher (a debounce, fixed time) decides whether 1.5× is reachable at all. **Unknown until the cloud edit profile.**
 - **cold-filemap:** 180 ms has to go. It shares the build and serialisation path with warm-build, so it follows warm-build's gains. Since phase 4 it is 124 ms slower than warm-build, which is the cold crawl and hashing. **Likely if warm-build gets there.**
 
-## Mac CPU profile at the phase 4 head (Mac only, inflated by load and profiling)
+## Cloud profile at the phase 4 head
 
-Inclusive CPU time, warm `runBuild`, with all phase 4 components on. The total is 6.2 s of CPU in a 4.3 s wall-clock run, with the Mac under load.
+Run by the coordinator on the cloud runner at `34fd43f`, with the phase 4 components on. The project's copy is `metro-rs-plan/phase-5-profile.md`. It replaces the Mac profile this note had before, which file opens distorted.
 
-| Area | CPU time |
+### warm-build: JS 3274 ms, Rust 1681 ms (1.95×); 2.5× needs 1310 ms
+
+Serialisation takes about 361 ms in Rust, against 303 ms in JS. Rust is slower here mostly because of the source reads.
+
+| Inside serialisation | ms |
 |---|---:|
-| Serializers (`DeltaBundler/Serializers/*`) | 1194 ms |
-| `module.getSource()` source reads for source maps (part of the serializers row) | 624 ms |
-| metro-source-map (part of the serializers row) | 345 ms |
-| Graph traversal (Graph, buildSubgraph, rustGraph) | 1206 ms, mostly awaiting transforms |
-| Transformer | 1471 ms (async, overlaps) |
-| Resolver glue | 426 ms |
-| File map | 151 ms |
-| Module loading (Babel register, the bench harness, same on both sides) | 2135 ms |
-| idle | 640 ms |
-| GC | 215 ms |
+| `getSource()` reads for `sourcesContent` (2,739 `readFileSync`) | 66 |
+| building the map | 80 |
+| `JSON.stringify` of the 25.6 MB index map, the biggest single piece | 166 |
+| `baseJSBundle` + `bundleToString` | 44 |
 
-What this says:
+Other costs:
 
-- **The serializer path is the largest piece phase 5 owns.** The synchronous source reads for `sourcesContent` alone are about half of it. On the Mac they are inflated by the file-open cost, but they cost real time on Linux too.
-- The absolute values aren't valid for decisions. The cloud profile decides.
+- **Handing strings back to JS** would cost about 152 ms, if Rust builds them: `Buffer.toString` takes 59 ms for the bundle and 93 ms for the map.
+- **Transform-cache reads** take 451 ms in Rust, mostly `JSON.parse` of the cache entries. This is the largest bucket left, and it isn't serialisation.
 
-## Planned steps (in order, each measured in the cloud before the next)
+What this means for the target:
 
-1. **Source-map sources off the JS thread** (`serializers`).
-   - Today `getSourceMapInfo` calls `module.getSource()`, a `readFileSync` per module, on every source-map request.
-   - Instead, Rust reads all the sources of a bundle in one parallel batch, from the file map's store, and hands them to the source-map encoder (`metro-source-map` is in Rust since phase 1).
-   - The JS shape of `getSource()` stays for anyone else who calls it.
-2. **The bundle body in Rust** (`serializers`, `lib`).
-   - `baseJSBundle` and `processModules` / `wrapModule` (`helpers/js.js`) build the code by concatenating every module's wrapped code.
-   - This is where rule 10 option B pays off. The transform outputs are kept as Rust-owned buffers when they come out of the cache or a worker: the cloud measured about 30 MB and 20 ms to copy them. The serializer then concatenates in Rust and returns one string or Buffer.
-   - Phase 4 kept option A, so this step revisits rule 10, with measurements.
-   - `customSerializer` and serializer options that Rust can't model stay JS (rule 1).
-3. **Source maps for the whole bundle** (`serializers`). `sourceMapString` / `sourceMapObject` build from the same Rust-held per-module maps, and only the final map string crosses.
-4. **HMR deltas** (`hmr`). `hmrJSBundle` (added, modified and deleted modules wrapped for HMR) builds in Rust from the phase 4 graph delta, and `HmrServer` sends it. This is the main lever for edit 1.5×.
-5. **Server bundle path** (`server`).
-   - URL parsing, options, the user hooks (`rewriteRequestUrl`, `enhanceMiddleware`, `customSerializer`) and caching headers stay JS.
-   - The response body comes from steps 2 and 3.
-   - The revision cache and delta calculation reuse phase 4's graph.
-6. **Output files** (`output`). `shared/output/bundle.js` writes the bundle, the map and the asset files. Rust writes them off-thread from the buffers in steps 2 and 3. The RAM-bundle and unbundle formats stay JS unless the profile says otherwise.
-7. **Assets** (`assets`): image size reading and hashing in `Assets.js`, natively, if the profile shows them. The bench app has few assets.
-8. **The "kept in JS for performance" list** (RULES.md §7), to re-measure:
-   - BundleBuilder (from phase 1);
-   - metro-core `canonicalize`;
-   - the JS `ob1` package;
-   - the source-map `sources` and `sourcesContent` assembly (covered by steps 1 and 3).
+- Even if every serialisation bucket went to zero, warm-build reaches only **2.44×**. With the string hand-back it is about **2.1×**.
+- **2.5× depends on removing the transform-cache `JSON.parse`.** That needs transform outputs owned by Rust (rule 10 option B).
+
+### edit: JS 298 ms, Rust 298 ms (1.0×); 1.5× needs 199 ms
+
+About 148 ms of an edit is phase 5's. The bench's edit scenario fetches the whole bundle again after the change, so this time is the server's response path.
+
+| Phase 5's part of an edit | ms |
+|---|---:|
+| `res.end` encoding the 16 MB bundle string to UTF-8 | 70 |
+| two `Buffer.byteLength` calls on that string (a rope) | 48 |
+| `baseJSBundle` | 27 |
+| `hmrJSBundle` | 0.05 |
+
+Outside phase 5 are the Babel transform of the edited file (71 ms) and the bench client decoding the response (71 ms).
+
+- **Sending a Buffer instead of a string** brings `res.end` to 0.7 ms.
+- **If Rust assembles the bundle and the server sends a Buffer,** an edit takes about 163 ms, which is **1.83×**.
+- **If a JS string is created anywhere on that path,** edit stays at about 1.06×.
+- `hmrJSBundle` is negligible, so the HMR step moves to the end.
+
+### Noise and gaps
+
+- None of the 50 edits hit the late-watcher case.
+- warm-build pairs ranged from 1.79× to 2.07×.
+- Edit ratios per run ranged from 0.81× to 1.07×.
+- cold-filemap wasn't measured. It shares the build path, so it follows steps 1 to 3.
+
+## Planned steps (revised after the cloud profile; each measured in the cloud before the next)
+
+1. **Bundle and map responses as Buffers built in Rust** (`server`, `serializers`, `lib`).
+   - The server's `.bundle` and `.map` responses come from one Rust call per request, which assembles the bytes:
+     - the prelude and polyfills;
+     - each module's wrapped code (`wrapModule`: the `__d(...)` call with its id, dependency ids and verbose name);
+     - the run-module statements;
+     - the trailing comments.
+   - The server sends them with `res.end(buffer)` and sets the length from the buffer. No JS string is made on that path.
+   - User hooks are called in JS before the Rust call and their results passed in (rule 1). That covers `getRunModuleStatement`, `processModuleFilter`, `createModuleId`, `getModulesRunBeforeMainModule` and `isThirdPartyModule`.
+   - With `customSerializer` set, the JS path runs as it does today.
+   - `runBuild`, `Server.build` and every public API keep returning strings. Only the HTTP path uses Buffers.
+   - The cloud profile's target for this step: edit about 1.8×.
+2. **The source map built and serialised in Rust** (`serializers`).
+   - The index map's JSON is written by Rust straight into a buffer, which removes the 166 ms `JSON.stringify`.
+   - Rust reads `sourcesContent` in one parallel batch through the file store, which removes the 2,739 sync reads.
+   - The same code serves `.map` responses (as a Buffer), inline maps and `runBuild` (as a string, since that is the public API).
+   - `excludeSource`, `sourcePaths` and the ignore list behave as the black-box suite pins them, including the inline-map quirk.
+3. **Transform outputs owned by Rust, rule 10 option B** (`serializers`, with `transform-cache` from phase 4).
+   - Rust reads and parses transform-cache entries and keeps the code and maps, which removes the 451 ms of `JSON.parse` in JS.
+   - JS gets what the graph needs: dependencies and output type. Steps 1 and 2 then read the code and maps from Rust without copying.
+   - **Needs Szymon's decision before it starts: this conflicts with boundary rule 9.** `module.output[].data.code` and `.map` are part of the public `Graph` objects, which custom serializers, `processModuleFilter`, `hmrJSBundle` and `getSource` read. Keeping them as real JS values defeats option B. Options:
+     - **(a)** lazy getters on `data` that fetch from Rust on first access. That is no proxy, but the objects change shape.
+     - **(b)** materialise `output` only when a JS consumer is present: a `customSerializer`, an HMR client, or `buildGraph`.
+     - **(c)** keep JS strings and accept about 2.1× on warm-build.
+
+   The step starts with a measurement and a short proposal to Szymon.
+4. **Output files** (`output`). `runBuild` writes `bundleOut` and `sourceMapOut` from the step 1 and 2 buffers when the default `output.save` is used, and calls a custom `output` in JS as it does today.
+5. **HMR, assets and the server's remaining paths** (`hmr`, `assets`, `server`), only where a measurement shows a cost. `hmrJSBundle` is 0.05 ms, so it stays JS unless something changes.
+6. **Re-measure what was kept in JS for speed** (RULES.md §7): BundleBuilder, metro-core `canonicalize`, the JS `ob1`.
 
 ## Tests first
 
