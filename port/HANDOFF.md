@@ -6,7 +6,7 @@ Written 2026-10-14 at about 20:40 UTC, when Szymon stopped work for the day. Rea
 
 - **Phases 0–3** are merged into `main` and approved by Szymon (`port/approvals/phase-0.md` … `phase-3.md`).
 - **Phase 4, "Incremental graph", is current** (`node port/lib/phase.js current` prints 4).
-  - Branch: `port/phase-4` in `~/Projects/metro-rs` on Szymon's Mac. Head: `85eeb28e7`.
+  - Branch: `port/phase-4` in `~/Projects/metro-rs` on Szymon's Mac. The head moves with every commit; read it with `git log -1` (it was `8a035d8e7` at the start of the step 3 validation session; the latest is named at the end of §3).
   - Everything, including the step 3 WIP and this handoff, is pushed to `origin/port/phase-4`.
 - **Scope**, widened by Szymon (see §2):
   - components `delta-core`, `incremental`, `transform-cache` and `worker-farm`;
