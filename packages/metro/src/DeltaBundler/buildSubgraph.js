@@ -9,6 +9,7 @@
  */
 
 import type {RequireContext} from '../lib/contextModule';
+import type {BatchResolution, PrepareBatchResolution} from './batchResolve';
 import type {
   Dependency,
   ModuleData,
@@ -18,6 +19,7 @@ import type {
   TransformResultDependency,
 } from './types';
 
+import {BATCH_RESOLVE} from './batchResolve';
 import {deriveAbsolutePathFromContext} from '../lib/contextModule';
 import {isResolvedDependency} from '../lib/isResolvedDependency';
 import path from 'node:path';
@@ -27,6 +29,33 @@ type Parameters<T> = Readonly<{
   transform: TransformFn<T>,
   shouldTraverse: ResolvedDependency => boolean,
 }>;
+
+function prepareBatch(
+  parentPath: string,
+  dependencies: ReadonlyArray<TransformResultDependency>,
+  resolve: ResolveFn,
+): ?BatchResolution {
+  // $FlowFixMe[invalid-computed-prop]
+  // $FlowFixMe[prop-missing]
+  const prepare: ?PrepareBatchResolution = resolve[BATCH_RESOLVE];
+  if (prepare == null) {
+    return null;
+  }
+  const keys = new Set<string>();
+  const resolvable: Array<TransformResultDependency> = [];
+  for (const dep of dependencies) {
+    if (keys.has(dep.data.key)) {
+      // The loop throws at a duplicate key, after resolving the dependencies
+      // before it and no others. Do not resolve ahead of it.
+      return null;
+    }
+    keys.add(dep.data.key);
+    if (!dep.data.contextParams) {
+      resolvable.push(dep);
+    }
+  }
+  return resolvable.length > 0 ? prepare(parentPath, resolvable) : null;
+}
 
 function resolveDependencies(
   parentPath: string,
@@ -38,6 +67,16 @@ function resolveDependencies(
 } {
   const maybeResolvedDeps = new Map<string, Dependency>();
   const resolvedContexts = new Map<string, RequireContext>();
+
+  // With Metro's own `resolve`, the dependencies that call it may be answered
+  // a module at a time. `batchAnswers` are the ones from `batchStart`; the
+  // dependency after them (if any) and the ones that cannot be batched go
+  // through `resolve` as always, in the same order.
+  const batch = prepareBatch(parentPath, dependencies, resolve);
+  let batchAnswers: ReadonlyArray<string> = [];
+  let batchStart = 0;
+  let nextBatch = 0;
+  let resolvableIndex = 0;
 
   for (const dep of dependencies) {
     let maybeResolvedDep: Dependency;
@@ -68,9 +107,20 @@ function resolveDependencies(
         data: dep,
       };
     } else {
+      const index = resolvableIndex++;
+      if (batch != null && index >= nextBatch) {
+        batchAnswers = batch.resolveFrom(index);
+        batchStart = index;
+        // The dependency after the answers is resolved below, so the next
+        // batch starts after it.
+        nextBatch = index + batchAnswers.length + 1;
+      }
       try {
         maybeResolvedDep = {
-          absolutePath: resolve(parentPath, dep).filePath,
+          absolutePath:
+            batch != null && index - batchStart < batchAnswers.length
+              ? batchAnswers[index - batchStart]
+              : resolve(parentPath, dep).filePath,
           data: dep,
         };
       } catch (error) {

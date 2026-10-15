@@ -18,6 +18,7 @@ import {getAssetUrlPath} from '../Assets';
 import {normalizePathSeparatorsToPosix} from '../lib/pathUtils';
 import getTransformCacheKey from './getTransformCacheKey';
 import WorkerFarm from './WorkerFarm';
+import {isRustEnabled} from 'metro-rust-switch';
 import debugModule from 'debug';
 import {Cache, stableHash} from 'metro-cache';
 import assert from 'node:assert';
@@ -37,7 +38,8 @@ export default class Transformer {
   _baseHash: string;
   _getDynamicRoots: () => ReadonlyArray<DynamicRoot>;
   _getSha1: GetOrComputeSha1Fn;
-  _workerFarm: WorkerFarm;
+  _workerFarm: ?WorkerFarm = null;
+  _transformerOptions: TransformerConfig;
 
   constructor(
     config: ConfigT,
@@ -80,8 +82,24 @@ export default class Transformer {
     this._baseHash = baseHashBuffer.toString('binary');
     debug('Base hash: %s', baseHashBuffer.toString('hex'));
 
-    // Start workers last - nothing can end them if the constructor throws.
-    this._workerFarm = new WorkerFarm(config, transformerOptions);
+    this._transformerOptions = transformerOptions;
+    // The `worker-farm` component of the Rust port (METRO_RUST): start the
+    // workers on the first cache miss instead of here, so a build whose
+    // transforms are all cache hits never forks them (port/design/phase-4.md).
+    // With the component off, they start here, as upstream.
+    if (!isRustEnabled('worker-farm', config.unstable_rust)) {
+      // Start workers last - nothing can end them if the constructor throws.
+      this._getWorkerFarm();
+    }
+  }
+
+  _getWorkerFarm(): WorkerFarm {
+    let workerFarm = this._workerFarm;
+    if (workerFarm == null) {
+      workerFarm = new WorkerFarm(this._config, this._transformerOptions);
+      this._workerFarm = workerFarm;
+    }
+    return workerFarm;
   }
 
   async transformFile(
@@ -189,7 +207,7 @@ export default class Transformer {
       sha1: string,
     }> = result
       ? {result, sha1}
-      : await this._workerFarm.transform(
+      : await this._getWorkerFarm().transform(
           projectRelativePath,
           transformerOptions,
           content,
@@ -224,7 +242,7 @@ export default class Transformer {
   }
 
   async end(): Promise<void> {
-    await this._workerFarm.kill();
+    await this._workerFarm?.kill();
   }
 }
 

@@ -17,6 +17,7 @@ metro-rs-cache-key = { path = "../cache-key" }
 metro-rs-file-store = { path = "../file-store" }
 metro-rs-file-map = { path = "../file-map" }
 metro-rs-haste = { path = "../haste" }
+metro-rs-graph = { path = "../graph" }
 metro-rs-resolver = { path = "../resolver" }
 napi = { version = "2", default-features = false, features = ["napi3"] }
 napi-derive = "2"

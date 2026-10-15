@@ -5,6 +5,14 @@
       "components": ["buck"],
       "reason": "replaces fs with a mock"
     },
+    "packages/metro-cache/src/stores/__tests__/AutoCleanFileStore-test.js": {
+      "components": ["transform-cache"],
+      "reason": "replaces node:fs with memfs; JS-only for transform-cache by Szymon's decision (2026-10-14); its cases run on the real disk in port/blackbox/__tests__/file-store-test.js"
+    },
+    "packages/metro-cache/src/stores/__tests__/FileStore-test.js": {
+      "components": ["transform-cache"],
+      "reason": "replaces node:fs with memfs; JS-only for transform-cache by Szymon's decision (2026-10-14); its cases run on the real disk in port/blackbox/__tests__/file-store-test.js"
+    },
     "packages/metro-cache-key/src/__tests__/index-test.js": {
       "components": ["cache-key"],
       "reason": "replaces fs with a mock"

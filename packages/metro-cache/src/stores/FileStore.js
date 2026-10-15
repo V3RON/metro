@@ -9,6 +9,7 @@
  * @oncall react_native
  */
 
+import {getRustBinding, isRustEnabled} from 'metro-rust-switch';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -28,7 +29,7 @@ export default class FileStore<T> {
 
   async get(key: Buffer): Promise<?T> {
     try {
-      const data = await fs.promises.readFile(this.#getFilePath(key));
+      const data = await readEntry(this.#getFilePath(key));
 
       if (data[0] === NULL_BYTE) {
         return data.slice(1) as any;
@@ -88,4 +89,72 @@ export default class FileStore<T> {
       });
     }
   }
+}
+
+type TransformCacheBinding = {
+  transformCacheRead(
+    filePath: string,
+  ): Promise<Buffer | null | {errorCode?: string, errorMessage: string}>,
+  ...
+};
+
+let lastMetroRust: ?string;
+let lastBinding: ?TransformCacheBinding = null;
+let lastVerify: ?string;
+let lastVerifyEnabled = false;
+
+/**
+ * The `transform-cache` component of the Rust port (METRO_RUST): read an entry
+ * with one read on a Rust worker thread (port/design/phase-4.md). Resolves to
+ * the same Buffer `fs.promises.readFile` would, and rejects with an Error
+ * carrying the same `code` and message. With the component off, it is
+ * `fs.promises.readFile`.
+ */
+async function readEntry(filePath: string): Promise<Buffer> {
+  const metroRust = process.env.METRO_RUST;
+  if (metroRust !== lastMetroRust) {
+    // $FlowFixMe[incompatible-type] The binding exports more than version().
+    const binding: ?TransformCacheBinding = getRustBinding('transform-cache');
+    lastBinding = binding;
+    lastMetroRust = metroRust;
+  }
+  const binding = lastBinding;
+  if (binding == null) {
+    return fs.promises.readFile(filePath);
+  }
+  const result: any = await binding.transformCacheRead(filePath);
+  if (result == null) {
+    const error: any = new Error(
+      `ENOENT: no such file or directory, open '${filePath}'`,
+    );
+    error.code = 'ENOENT';
+    throw error;
+  }
+  if (!Buffer.isBuffer(result)) {
+    const error: any = new Error(result.errorMessage);
+    error.code = result.errorCode;
+    throw error;
+  }
+  const data: Buffer = result;
+  if (isVerifyEnabled()) {
+    const expected = await fs.promises.readFile(filePath);
+    if (!expected.equals(data)) {
+      throw new Error(
+        `METRO_RUST_VERIFY: transform-cache read of ${filePath} differs from fs.promises.readFile`,
+      );
+    }
+  }
+  return data;
+}
+
+function isVerifyEnabled(): boolean {
+  const verify = process.env.METRO_RUST_VERIFY;
+  if (verify !== lastVerify) {
+    lastVerifyEnabled =
+      verify != null &&
+      verify !== '' &&
+      isRustEnabled('transform-cache', null, {METRO_RUST: verify});
+    lastVerify = verify;
+  }
+  return lastVerifyEnabled;
 }

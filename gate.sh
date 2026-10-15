@@ -132,6 +132,11 @@ if want tests; then
     fi
   fi
   step tests "differential bundles (JS vs Rust, byte for byte)" node port/diff/differential.js --phase "$PHASE" || fail tests 20
+  # From phase 4 (incremental graph), the exit criterion includes identical
+  # HMR messages across a scripted edit session.
+  if [ "$PHASE" -ge 4 ]; then
+    step tests "HMR session differential (JS vs Rust)" node port/diff/hmr-session.js --phase "$PHASE" || fail tests 20
+  fi
   record tests pass ""
 fi
 

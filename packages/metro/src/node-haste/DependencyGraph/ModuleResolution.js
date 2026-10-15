@@ -21,6 +21,7 @@ import type {
   FileCandidates,
   FileSystemLookup,
   Resolution,
+  ResolutionContext,
   ResolveAsset,
 } from 'metro-resolver';
 import type {PackageForModule, PackageJson} from 'metro-resolver/private/types';
@@ -145,13 +146,16 @@ export class ModuleResolver {
     return emptyModule;
   }
 
-  resolveDependency(
+  /**
+   * The `ResolutionContext` for resolving `dependency` from `originModulePath`.
+   */
+  createContext(
     originModulePath: string,
     dependency: TransformResultDependency,
     allowHaste: boolean,
     platform: string | null,
     resolverOptions: ResolverInputOptions,
-  ): BundlerResolution {
+  ): ResolutionContext {
     const {
       assetExts,
       disableHierarchicalLookup,
@@ -172,41 +176,69 @@ export class ModuleResolver {
       unstable_enablePackageExports,
       unstable_incrementalResolution,
     } = this._options;
+    const {resolveHasteModule, resolveHastePackage} =
+      this._getHasteResolvers(platform);
+    return createDefaultContext(
+      {
+        allowHaste,
+        assetExts,
+        customResolverOptions: resolverOptions.customResolverOptions ?? {},
+        dev: resolverOptions.dev,
+        disableHierarchicalLookup,
+        doesFileExist,
+        extraNodeModules,
+        fileSystemLookup,
+        getPackage,
+        getPackageForModule,
+        isESMImport: dependency.data.isESMImport,
+        mainFields,
+        nodeModulesPaths,
+        originModulePath,
+        preferNativePlatform,
+        resolveAsset,
+        resolveHasteModule,
+        resolveHastePackage,
+        resolveRequest,
+        schemeResolvers,
+        sourceExts,
+        unstable_conditionNames,
+        unstable_conditionsByPlatform,
+        unstable_enablePackageExports,
+        unstable_incrementalResolution,
+        unstable_logWarning: this._logWarning,
+      },
+      dependency,
+    );
+  }
 
+  /**
+   * Runs `fn` with resolver warnings dropped (METRO_RUST_VERIFY resolves a
+   * dependency a second time and must not report its warnings twice).
+   */
+  withoutWarnings<T>(fn: () => T): T {
+    this._warningsMuted++;
     try {
-      const {resolveHasteModule, resolveHastePackage} =
-        this._getHasteResolvers(platform);
+      return fn();
+    } finally {
+      this._warningsMuted--;
+    }
+  }
+
+  resolveDependency(
+    originModulePath: string,
+    dependency: TransformResultDependency,
+    allowHaste: boolean,
+    platform: string | null,
+    resolverOptions: ResolverInputOptions,
+  ): BundlerResolution {
+    try {
       const result = Resolver.resolve(
-        createDefaultContext(
-          {
-            allowHaste,
-            assetExts,
-            customResolverOptions: resolverOptions.customResolverOptions ?? {},
-            dev: resolverOptions.dev,
-            disableHierarchicalLookup,
-            doesFileExist,
-            extraNodeModules,
-            fileSystemLookup,
-            getPackage,
-            getPackageForModule,
-            isESMImport: dependency.data.isESMImport,
-            mainFields,
-            nodeModulesPaths,
-            originModulePath,
-            preferNativePlatform,
-            resolveAsset,
-            resolveHasteModule,
-            resolveHastePackage,
-            resolveRequest,
-            schemeResolvers,
-            sourceExts,
-            unstable_conditionNames,
-            unstable_conditionsByPlatform,
-            unstable_enablePackageExports,
-            unstable_incrementalResolution,
-            unstable_logWarning: this._logWarning,
-          },
+        this.createContext(
+          originModulePath,
           dependency,
+          allowHaste,
+          platform,
+          resolverOptions,
         ),
         dependency.name,
         platform,
@@ -298,7 +330,12 @@ export class ModuleResolver {
     }
   }
 
+  _warningsMuted: number = 0;
+
   _logWarning = (message: string): void => {
+    if (this._warningsMuted > 0) {
+      return;
+    }
     this._options.reporter.update({
       message,
       type: 'resolver_warning',

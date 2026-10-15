@@ -15,6 +15,7 @@ mod package_exports;
 mod package_imports;
 mod package_resolve;
 pub mod path;
+mod resolution_cache;
 mod resolve;
 mod resolve_asset;
 mod utils;
@@ -24,6 +25,7 @@ pub use error::{
     format_file_candidates, FileAndDirCandidates, FileCandidates, HostError, ResolveError,
 };
 pub use host::{Lookup, PackageForModule, PackageJson, ResolverHost};
+pub use resolution_cache::{origin_key, ResolutionCache};
 pub use resolve::{resolve, resolve_default};
 
 /// `types.js` `Resolution` (without `virtualModule`, which only a custom

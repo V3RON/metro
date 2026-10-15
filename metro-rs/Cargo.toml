@@ -9,6 +9,7 @@ members = [
   "crates/file-store",
   "crates/file-map",
   "crates/haste",
+  "crates/graph",
   "crates/binding",
 ]
 
