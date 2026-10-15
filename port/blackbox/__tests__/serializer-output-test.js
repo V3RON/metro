@@ -10,9 +10,9 @@
  */
 'use strict';
 
+const {Metro, createProject, execBundle, fetchFresh, startServer} = require('../helpers/project');
 const fs = require('node:fs');
 const path = require('node:path');
-const {Metro, createProject, startServer, fetchFresh, execBundle} = require('../helpers/project');
 
 jest.useRealTimers();
 jest.setTimeout(90000);
