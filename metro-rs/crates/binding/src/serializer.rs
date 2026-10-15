@@ -9,7 +9,7 @@ use metro_rs_serializer::index_map::{
 };
 use metro_rs_serializer::{assemble, Entry, ModuleStore};
 use napi::bindgen_prelude::{AsyncTask, Buffer, Uint32Array, Uint8Array};
-use napi::{Env, Error, Result, Task};
+use napi::{Env, Error, JsUnknown, Result, Task};
 use napi_derive::napi;
 
 /// In `tokens`: "the next literal".
@@ -186,6 +186,39 @@ impl IndexMapBuilder {
         }))
     }
 
+    /// Builds the map on the calling thread and returns it as a JavaScript
+    /// string made here (latin1 when all ASCII), or the indices of the
+    /// modules whose file could not be read, as an array.
+    #[napi]
+    pub fn build_string(&self, env: Env, request: IndexMapRequest) -> Result<JsUnknown> {
+        let (modules, exclude_source) = self.prepare(request)?;
+        string_or_failed(env, build_index_map(&modules, exclude_source))
+    }
+
+    /// `build_string` on a worker thread.
+    #[napi]
+    pub fn build_string_async(
+        &self,
+        request: IndexMapRequest,
+    ) -> Result<AsyncTask<IndexMapStringTask>> {
+        let (modules, exclude_source) = self.prepare(request)?;
+        Ok(AsyncTask::new(IndexMapStringTask {
+            modules: Some(modules),
+            exclude_source,
+        }))
+    }
+
+    /// Drops every entry held, now, and returns memory to the system.
+    #[napi]
+    pub fn clear(&self) -> Result<()> {
+        self.cache
+            .lock()
+            .map_err(|_| Error::from_reason("IndexMapBuilder is poisoned"))?
+            .clear();
+        metro_rs_serializer::index_map::trim_memory();
+        Ok(())
+    }
+
     /// Number of entries held (for tests).
     #[napi]
     pub fn held(&self) -> u32 {
@@ -310,5 +343,51 @@ impl Task for IndexMapTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<IndexMapResult> {
         Ok(finish(output))
+    }
+}
+
+fn string_or_failed(
+    env: Env,
+    result: std::result::Result<Vec<u8>, Vec<usize>>,
+) -> Result<JsUnknown> {
+    match result {
+        Ok(bytes) => {
+            let string = if bytes.is_ascii() {
+                env.create_string_latin1(&bytes)?
+            } else {
+                // Valid UTF-8 by construction (JSON of decoded text).
+                env.create_string_from_std(
+                    String::from_utf8(bytes).map_err(|e| Error::from_reason(e.to_string()))?,
+                )?
+            };
+            metro_rs_serializer::index_map::trim_memory();
+            Ok(string.into_unknown())
+        }
+        Err(failed) => {
+            let mut array = env.create_array_with_length(failed.len())?;
+            for (k, i) in failed.into_iter().enumerate() {
+                array.set_element(k as u32, env.create_uint32(i as u32)?)?;
+            }
+            Ok(array.into_unknown())
+        }
+    }
+}
+
+pub struct IndexMapStringTask {
+    modules: Option<Vec<ModuleSpec>>,
+    exclude_source: bool,
+}
+
+impl Task for IndexMapStringTask {
+    type Output = std::result::Result<Vec<u8>, Vec<usize>>;
+    type JsValue = JsUnknown;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let modules = self.modules.take().unwrap_or_default();
+        Ok(build_index_map(&modules, self.exclude_source))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<JsUnknown> {
+        string_or_failed(env, output)
     }
 }

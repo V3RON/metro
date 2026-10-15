@@ -7,3 +7,4 @@ publish.workspace = true
 description = "Assembles a JS bundle's bytes from module code held in Rust (the bundle part of Metro's serializers), pure Rust."
 
 [dependencies]
+libc = "0.2" # malloc_trim on Linux/glibc (see index_map::trim_memory)

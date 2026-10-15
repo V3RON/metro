@@ -20,8 +20,8 @@
 //! cannot cross as UTF-8, and `JSON.stringify` writes those as `\udxxx`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Files larger than this are reported as unreadable: Node cannot make a
 /// string of them (`buffer.constants.MAX_STRING_LENGTH` is 2^29 - 24 UTF-16
@@ -97,6 +97,10 @@ impl Cache {
         self.entries.insert(token, Arc::new(entry));
     }
 
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     pub fn remove(&mut self, token: u32) {
         self.entries.remove(&token);
     }
@@ -170,64 +174,114 @@ fn write_json_escaped(bytes: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&bytes[start..]);
 }
 
-/// A JSON string literal of the file's contents decoded like
-/// `Buffer.toString()` (`String::from_utf8_lossy` follows the same "maximal
-/// subpart" replacement rule as V8), or `None` if it cannot be read like
-/// `fs.readFileSync` followed by `toString()` would.
-fn read_file_json(path: &str) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(meta.len() as usize + 1);
-    file.read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut out = Vec::with_capacity(text.len() + text.len() / 16 + 2);
-    write_json_string(&text, &mut out);
-    Some(out)
-}
-
-/// Reads the files in parallel. `None` for a file that could not be read.
-pub fn read_files_json(paths: &[&str]) -> Vec<Option<Vec<u8>>> {
+/// Runs `work(i)` for every `i < n` on up to 8 threads.
+fn parallel(n: usize, work: impl Fn(usize) + Sync) {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
         .min(8)
-        .min(paths.len());
+        .min(n);
     if threads <= 1 {
-        return paths.iter().map(|p| read_file_json(p)).collect();
+        (0..n).for_each(work);
+        return;
     }
     let next = AtomicUsize::new(0);
-    let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
     std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= paths.len() {
-                            break;
-                        }
-                        done.push((i, read_file_json(paths[i])));
-                    }
-                    done
-                })
-            })
-            .collect();
-        for handle in handles {
-            // A panic in a reader is a bug, not an unreadable file.
-            for (i, bytes) in handle.join().expect("source reader panicked") {
-                results[i] = bytes;
-            }
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                work(i);
+            });
         }
     });
-    results
+}
+
+/// Reads exactly `dst.len()` bytes, then checks that the file ends there.
+fn read_into(path: &str, dst: &mut [u8]) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if file.read_exact(dst).is_err() {
+        return false;
+    }
+    let mut extra = [0u8; 1];
+    matches!(file.read(&mut extra), Ok(0))
+}
+
+const FAILED_SIZE: u64 = u64::MAX;
+
+/// Reads the files in parallel into ONE buffer (no per-file or per-thread
+/// allocations): threads stat the files, the caller sizes the buffer, then
+/// threads read into disjoint slices. A file that is not a regular file, is
+/// too big for a JavaScript string, cannot be read, or changed size between
+/// the stat and the read is failed. Returns the bytes and each file's range,
+/// or the indices (into `paths`) of the failed files.
+type Ranges = Vec<std::ops::Range<usize>>;
+
+fn read_files(paths: &[&str]) -> Result<(Vec<u8>, Ranges), Vec<usize>> {
+    let sizes: Vec<AtomicU64> = (0..paths.len()).map(|_| AtomicU64::new(0)).collect();
+    parallel(paths.len(), |i| {
+        let size = match std::fs::metadata(paths[i]) {
+            Ok(meta) if meta.is_file() && meta.len() <= MAX_FILE_BYTES => meta.len(),
+            _ => FAILED_SIZE,
+        };
+        sizes[i].store(size, Ordering::Relaxed);
+    });
+    let mut failed: Vec<usize> = Vec::new();
+    let mut ranges = Vec::with_capacity(paths.len());
+    let mut total = 0usize;
+    for (i, size) in sizes.iter().enumerate() {
+        let size = size.load(Ordering::Relaxed);
+        if size == FAILED_SIZE {
+            failed.push(i);
+            ranges.push(0..0);
+        } else {
+            ranges.push(total..total + size as usize);
+            total += size as usize;
+        }
+    }
+    if !failed.is_empty() {
+        return Err(failed);
+    }
+    let mut buffer = vec![0u8; total];
+    let ok: Vec<AtomicBool> = (0..paths.len()).map(|_| AtomicBool::new(false)).collect();
+    {
+        let mut rest: &mut [u8] = &mut buffer;
+        let mut slices: Vec<Mutex<&mut [u8]>> = Vec::with_capacity(paths.len());
+        for range in &ranges {
+            let (head, tail) = rest.split_at_mut(range.len());
+            slices.push(Mutex::new(head));
+            rest = tail;
+        }
+        parallel(paths.len(), |i| {
+            let mut slice = slices[i].lock().expect("slice lock");
+            ok[i].store(read_into(paths[i], &mut slice), Ordering::Relaxed);
+        });
+    }
+    let failed: Vec<usize> = (0..paths.len())
+        .filter(|i| !ok[*i].load(Ordering::Relaxed))
+        .collect();
+    if failed.is_empty() {
+        Ok((buffer, ranges))
+    } else {
+        Err(failed)
+    }
+}
+
+/// Gives freed memory back to the system. glibc keeps what threads freed in
+/// their arenas, and the 25 MB allocations of a big map land there, so the
+/// resident size would stay high long after a build. Nothing is done on other
+/// platforms or libcs.
+pub fn trim_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim has no preconditions; it only returns free memory.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// The index map for `modules`. On success the bytes; if files could not be
@@ -236,7 +290,13 @@ pub fn build_index_map(
     modules: &[ModuleSpec],
     exclude_source: bool,
 ) -> Result<Vec<u8>, Vec<usize>> {
-    // Read and escape the files first.
+    let result = build_inner(modules, exclude_source);
+    trim_memory();
+    result
+}
+
+fn build_inner(modules: &[ModuleSpec], exclude_source: bool) -> Result<Vec<u8>, Vec<usize>> {
+    // The files, in one buffer.
     let mut file_modules: Vec<usize> = Vec::new();
     let mut file_paths: Vec<&str> = Vec::new();
     if !exclude_source {
@@ -249,19 +309,17 @@ pub fn build_index_map(
             }
         }
     }
-    let files = read_files_json(&file_paths);
-    let failed: Vec<usize> = file_modules
-        .iter()
-        .zip(&files)
-        .filter(|(_, f)| f.is_none())
-        .map(|(i, _)| *i)
-        .collect();
-    if !failed.is_empty() {
-        return Err(failed);
-    }
-    let mut file_json: HashMap<usize, Vec<u8>> = HashMap::with_capacity(files.len());
-    for (i, bytes) in file_modules.iter().zip(files) {
-        file_json.insert(*i, bytes.expect("checked above"));
+    let (raw, ranges) = read_files(&file_paths).map_err(|failed| {
+        failed
+            .into_iter()
+            .map(|k| file_modules[k])
+            .collect::<Vec<_>>()
+    })?;
+    // Module index -> its file's range.
+    let mut range_of: HashMap<usize, std::ops::Range<usize>> =
+        HashMap::with_capacity(file_modules.len());
+    for (i, range) in file_modules.iter().zip(ranges) {
+        range_of.insert(*i, range);
     }
 
     let mut estimate = 32;
@@ -276,7 +334,7 @@ pub fn build_index_map(
         if !exclude_source {
             estimate += match &m.source {
                 Source::Empty => 2,
-                Source::File(_) => file_json.get(&i).map_or(0, |f| f.len()),
+                Source::File(_) => range_of.get(&i).map_or(0, |r| r.len() + r.len() / 16 + 2),
                 Source::Literal(l) => l.len(),
             };
         }
@@ -301,7 +359,11 @@ pub fn build_index_map(
                 out.extend_from_slice(b"\"sourcesContent\":[");
                 match &m.source {
                     Source::Empty => out.extend_from_slice(b"\"\""),
-                    Source::File(_) => out.extend_from_slice(&file_json[&i]),
+                    Source::File(_) => {
+                        // Valid UTF-8 is not copied by from_utf8_lossy.
+                        let text = String::from_utf8_lossy(&raw[range_of[&i].clone()]);
+                        write_json_string(&text, &mut out);
+                    }
                     Source::Literal(l) => out.extend_from_slice(l.as_bytes()),
                 }
                 out.extend_from_slice(b"],");
