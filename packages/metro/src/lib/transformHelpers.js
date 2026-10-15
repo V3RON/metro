@@ -22,7 +22,7 @@ import type {RequireContext} from './contextModule';
 import type {ConfigT} from 'metro-config';
 import type {Type} from 'metro-transform-worker';
 
-import {BATCH_RESOLVE} from '../DeltaBundler/batchResolve';
+import {BATCH_RESOLVE, getBatchResolver} from '../DeltaBundler/batchResolve';
 import {getContextModuleTemplate} from './contextModuleTemplates';
 import isAssetFile from 'metro-resolver/private/utils/isAssetFile';
 
@@ -228,14 +228,15 @@ export async function getResolveDependencyFn(
     );
   // Tagged only for this function: one that wraps it does not carry the tag,
   // and then every dependency goes through `resolve`.
-  if (dependencyGraph.supportsBatchResolution()) {
+  const batchResolver = getBatchResolver(dependencyGraph);
+  if (batchResolver != null && batchResolver.supports()) {
     // $FlowFixMe[invalid-computed-prop]
     // $FlowFixMe[prop-missing]
     resolve[BATCH_RESOLVE] = (
       from: string,
       dependencies: ReadonlyArray<TransformResultDependency>,
     ) =>
-      dependencyGraph.prepareBatchResolution(
+      batchResolver.prepare(
         from,
         dependencies,
         platform ?? null,

@@ -8,6 +8,7 @@
  * @format
  */
 
+import type {ResolverInputOptions} from '../shared/types';
 import type {TransformResultDependency} from './types';
 
 /**
@@ -38,3 +39,31 @@ export type PrepareBatchResolution = (
   from: string,
   dependencies: ReadonlyArray<TransformResultDependency>,
 ) => ?BatchResolution;
+
+/**
+ * Internal (not part of Metro's public API): how a `DependencyGraph` offers
+ * batch resolution to `transformHelpers`, kept here so the class gains no
+ * public method.
+ */
+export type BatchResolver = {
+  supports(): boolean,
+  prepare(
+    originModulePath: string,
+    dependencies: ReadonlyArray<TransformResultDependency>,
+    platform: string | null,
+    resolverOptions: ResolverInputOptions,
+  ): ?BatchResolution,
+};
+
+const batchResolvers: WeakMap<interface {}, BatchResolver> = new WeakMap();
+
+export function registerBatchResolver(
+  graph: interface {},
+  resolver: BatchResolver,
+): void {
+  batchResolvers.set(graph, resolver);
+}
+
+export function getBatchResolver(graph: interface {}): ?BatchResolver {
+  return batchResolvers.get(graph);
+}

@@ -15,7 +15,6 @@ import type {
 } from '../DeltaBundler/types';
 import type {DynamicRoot} from '../lib/dynamicRoots';
 import type {ResolverInputOptions} from '../shared/types';
-import type {RustResolutionCache} from 'metro-resolver/private/rust';
 import type {ModuleResolver} from './DependencyGraph/ModuleResolution';
 import type {ConfigT} from 'metro-config';
 import type {
@@ -28,7 +27,9 @@ import type {
   WatcherStatus,
   default as MetroFileMap,
 } from 'metro-file-map';
+import type {RustResolutionCache} from 'metro-resolver/private/rust';
 
+import {registerBatchResolver} from '../DeltaBundler/batchResolve';
 import {getDynamicRoots} from '../lib/dynamicRoots';
 import createFileMap from './DependencyGraph/createFileMap';
 import createModuleResolver from './DependencyGraph/createModuleResolver';
@@ -61,7 +62,7 @@ type ResolveExtraOptions = {assumeFlatNodeModules: boolean};
 
 /**
  * The dependencies of one module being resolved in batches, see
- * `DependencyGraph.prepareBatchResolution`.
+ * `prepareBatchResolution`.
  */
 export type BatchResolution = {
   /**
@@ -153,6 +154,10 @@ export default class DependencyGraph extends EventEmitter {
     super();
 
     this._config = config;
+    registerBatchResolver(this, {
+      supports: () => this.#supportsBatchResolution(),
+      prepare: (...args) => this.#prepareBatchResolution(...args),
+    });
 
     const {hasReducedPerformance, watch} = options ?? {};
     const initializingMetroLogEntry = log(
@@ -363,7 +368,7 @@ export default class DependencyGraph extends EventEmitter {
     resolverOptions: ResolverInputOptions,
 
     // TODO: Fold assumeFlatNodeModules into resolverOptions and add to graphId
-    extraOptions: ResolveExtraOptions = {
+    extraOptions: {assumeFlatNodeModules: boolean} = {
       assumeFlatNodeModules: false,
     },
   ): BundlerResolution {
@@ -453,7 +458,7 @@ export default class DependencyGraph extends EventEmitter {
    * Whether `prepareBatchResolution` can ever answer: the `incremental`
    * component is on and the resolver is fully native.
    */
-  supportsBatchResolution(): boolean {
+  #supportsBatchResolution(): boolean {
     return this.#nativeResolutionCache != null;
   }
 
@@ -470,7 +475,7 @@ export default class DependencyGraph extends EventEmitter {
    * (so that `resolveDependency` throws it, warns and records it as it does
    * today), or that a scheme resolver answers.
    */
-  prepareBatchResolution(
+  #prepareBatchResolution(
     originModulePath: string,
     dependencies: ReadonlyArray<TransformResultDependency>,
     platform: string | null,
